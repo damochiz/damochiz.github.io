@@ -1,0 +1,4 @@
+Flask==2.3.2
+
+# Optional: add other packages if needed
+pywin32==305

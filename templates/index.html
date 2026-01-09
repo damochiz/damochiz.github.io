@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Mail Create</title>
+    <style>
+      body{margin:12px;font-family:Segoe UI, Meiryo, Arial}
+      #page{display:flex;gap:16px}
+      #left{width:600px}
+      #right{flex:1;border-left:3px solid #2f7f4f;padding-left:12px;min-height:720px}
+      .label{display:inline-block;width:90px;text-align:right;margin-right:8px}
+      #left .row{display:flex;align-items:center}
+      #left .row > .label{flex:0 0 90px}
+      #left .row > *:not(.label){flex:1}
+      #left .row > select{flex:0 0 320px}
+      #left .row.customer{margin-bottom:8px}
+      #left .row.content{margin-bottom:40px}
+      input[type=text], textarea, select{border:2px solid #111;padding:6px}
+      .btn-small{width:68px;margin-left:8px;flex:0 0 auto}
+      #footerSaveBtn{width:68px;margin-left:8px;flex:0 0 auto}
+      textarea{resize:vertical}
+      .row{margin-bottom:10px}
+      button{padding:8px 12px}
+      /* Modal for template editing */
+      .modal{position:fixed;inset:0;display:none;align-items:center;justify-content:center;background:rgba(0,0,0,0.45);z-index:2000}
+      .modal-content{background:#fff;padding:16px;border-radius:6px;max-width:900px;width:90%;max-height:90%;overflow:auto;box-sizing:border-box}
+      .modal-content h3{margin-top:0}
+    </style>
+  </head>
+  <body>
+    <h1>Mail Create</h1>
+    <div id="page">
+      <div id="left">
+        <div class="row"><span class="label"></span><button id="srImportBtn">SR Import</button> <button id="changeTemplateDirBtn" class="btn-small" title="テンプレート保存先を変更">Template Dir</button></div>
+        <div style="height:8px"></div>
+        <div class="row"><span class="label">SR 番号:</span>
+          <input list="srList" id="srNumberInput" style="width:420px" placeholder="SR番号を入力または選択" />
+          <datalist id="srList"></datalist>
+        </div>
+        <div class="row customer"><span class="label">お客様名:</span>
+          <input type="text" id="customerName" style="width:520px"/>
+          <button class="button is-small" id="replaceNameBtn" style="margin-left:12px">Replace</button>
+          <button class="button is-small" id="resetNameBtn" style="margin-left:8px">Reset</button>
+          <span id="replaceFeedback" style="margin-left:8px;color:green;display:none;">Saved</span>
+        </div>
+        <div class="row"><span class="label">タイトル:</span><input type="text" id="title" style="width:520px"/></div>
+
+        <div class="row content"><span class="label">内容:</span><textarea id="content" rows="8" style="width:520px"></textarea></div>
+
+        <div class="row">
+          <span class="label">メール種別:</span>
+          <select id="templateFileSelect" style="width:160px;margin-right:8px">
+            <option value="">[テンプレートファイル]</option>
+          </select>
+          <select id="emailType">
+            <option value="">[選択してください]</option>
+            <!-- dynamic options for selected template file will be populated -->
+          </select>
+          <button id="createMailBtn" class="btn-small">Create Mail</button>
+          <button id="templateChangeBtn" class="btn-small">Template Change</button>
+        </div>
+
+        <div class="row"><span class="label">電話状況:</span>
+          <select id="phoneStatus" style="width:320px"></select>
+        </div>
+        <div class="row"><span class="label">会議打診:</span>
+          <select id="meetingStatus" style="width:320px"></select>
+        </div>
+        <div class="row"><span class="label">NextC:</span>
+          <select id="nextC" style="width:320px"></select>
+        </div>
+
+        <div class="row"><span class="label">日程情報:</span><input type="date" id="schedDate" style="margin-right:8px"/> <input type="time" id="schedTime" style="margin-right:8px"/> <button id="createScheduleBtn" style="margin-left:8px">Create Schedule</button></div>
+
+        <div class="row" style="margin-top:40px"><span class="label">担当:</span>
+          <input type="text" id="supportFamily" placeholder="姓" style="width:82px;margin-right:6px" />
+          <input type="text" id="supportFirst" placeholder="名" style="width:82px;margin-right:6px" />
+          <input type="text" id="supportFamilyFuri" placeholder="セイ" style="width:82px;margin-right:6px" />
+          <input type="text" id="supportFirstFuri" placeholder="メイ" style="width:82px;margin-right:6px" />
+          <button id="ownerSaveBtn" class="btn-small">Save</button>
+        </div>
+
+        <div class="row"><span class="label">フッター:</span>
+          <textarea id="footer" rows="6" style="width:520px;resize:vertical" placeholder="メール末尾に挿入するフッターを入力してください"></textarea>
+        </div>
+        <div class="row"><span class="label">追加フッター:</span>
+          <textarea id="additionalFooter" rows="4" style="width:520px;resize:vertical" placeholder="<additional_footer> に入るテキスト"></textarea>
+        </div>
+        <div class="row"><span class="label">FCS フッター:</span>
+          <textarea id="fcsFooter" rows="4" style="width:520px;resize:vertical" placeholder="<fcs_footer> に入るテキスト"></textarea>
+        </div>
+
+        <div style="height:18px"></div>
+
+      </div>
+      <div id="right">
+        <div style="display:flex;align-items:center;justify-content:flex-end;margin-bottom:6px;gap:8px">
+          <button type="button" id="refreshPreviewBtn" style="padding:4px 8px;font-size:12px">Refresh</button>
+          <button type="button" id="reloadPageBtn" title="Reload page" style="padding:4px 8px;font-size:12px">Reload</button>
+        </div>
+        <div id="largePanel" style="width:100%;height:100%;background:#fff;border:1px solid #ccc;padding:12px;box-sizing:border-box;white-space:pre-wrap"></div>
+      </div>
+    </div>
+    <!-- Config Modal -->
+    <div id="configModal" class="modal" aria-hidden="true">
+      <div class="modal-content">
+        <h3>設定</h3>
+        <div style="margin-bottom:8px">テンプレート保存先フォルダを指定してください（OneDrive の CreateMailTool 配下など）</div>
+        <input type="text" id="templateDirInput" style="width:100%" placeholder="C:\\Users\\you\\OneDrive\\CreateMailTool\\template_files" />
+        <div style="margin-top:8px;margin-bottom:8px">
+          <button id="pickConfigBtn">Explorer から選択</button>
+        </div>
+        <div style="text-align:right;margin-top:8px">
+          <button id="saveConfigBtn">Save</button>
+          <button id="cancelConfigBtn">Cancel</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Template Edit Modal -->
+    <div id="templateModal" class="modal" aria-hidden="true">
+      <div class="modal-content">
+        <h3>テンプレート編集</h3>
+        <textarea id="templateEditor" rows="20" style="width:100%;box-sizing:border-box;font-family:inherit"></textarea>
+        <div style="text-align:right;margin-top:8px">
+          <button id="saveTemplateBtn">Save</button>
+          <button id="cancelTemplateBtn">Cancel</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- SR Import Modal -->
+    <div id="srImportModal" class="modal" aria-hidden="true">
+      <div class="modal-content">
+        <h3>SR リスト取り込み</h3>
+        <p>タブ区切りの SR リストを貼り付けてください。1列: Case number, 2列: Customer title, 3列: Internal title, 4列: Contact</p>
+        <textarea id="srImportTextarea" rows="12" style="width:100%;box-sizing:border-box"></textarea>
+        <div style="text-align:right;margin-top:8px">
+          <button id="srImportSaveBtn">取り込み</button>
+          <button id="srImportCancelBtn">Cancel</button>
+        </div>
+      </div>
+    </div>
+
+    <script src="/static/main.js"></script>
+  </body>
+</html>
