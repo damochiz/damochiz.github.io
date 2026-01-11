@@ -127,14 +127,6 @@ def ensure_templates_dir():
 def template_file_path_for(email_type: str) -> str:
     ensure_templates_dir()
     fname = safe_type_filename(email_type) + '.json'
-    # Prefer canonical 01_FCS.json when resolving FCS group files
-    try:
-        if fname.lower() == 'fcs.json':
-            preferred = os.path.join(get_template_dir(), '01_FCS.json')
-            if os.path.exists(preferred):
-                return preferred
-    except Exception:
-        pass
     return os.path.join(get_template_dir(), fname)
 
 

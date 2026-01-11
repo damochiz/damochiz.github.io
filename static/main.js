@@ -270,9 +270,9 @@ async function loadTemplateKeys(){
       for (const p of preserved){ const o = document.createElement('option'); o.value = p.value; o.textContent = p.text; select.appendChild(o); }
 
       if (!fn){
-        // default behavior: include keys from 01_FCS.json and 02_PR.json if present
-        const allowedFiles = ['01_FCS.json','02_PR.json'];
-        for (const af of allowedFiles){
+        // No file selected: populate the emailType select with keys from all template files.
+        const allFiles = Object.keys(j.files || {}).sort();
+        for (const af of allFiles){
           const keys = j.files[af] || [];
           if (!keys || !keys.length) continue;
           const og = document.createElement('optgroup'); og.label = `--- ${af} ---`;
