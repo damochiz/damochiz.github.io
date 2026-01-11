@@ -1,6 +1,23 @@
 async function postJson(url, data){
   const res = await fetch(url, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(data)});
-  return res.json();
+  const ct = res.headers.get('content-type') || '';
+  try{
+    if (ct.indexOf('application/json') !== -1){
+      const j = await res.json();
+      return j;
+    }
+    // If server did not return JSON, fall back to text and return an error-shaped object
+    const txt = await res.text();
+    return { status: res.ok ? 'ok' : 'error', message: txt };
+  }catch(e){
+    // JSON parse error or other failure: return text body if possible
+    try{
+      const txt = await res.text();
+      return { status: 'error', message: txt || String(e) };
+    }catch(ee){
+      return { status: 'error', message: String(e) };
+    }
+  }
 }
 
 // Global error handler to surface unexpected exceptions during initialization
@@ -29,6 +46,108 @@ if (_createMailBtn){
     }catch(e){ alert('メール作成に失敗しました: ' + e); }
   });
 } else { console.warn('createMailBtn not found'); }
+
+// Create Schedule button handler: requires schedDate and schedTime to be filled.
+(function(){
+  const csBtn = document.getElementById('createScheduleBtn');
+  if (!csBtn) return;
+  csBtn.addEventListener('click', async function(){
+    try{
+      const sdEl = document.getElementById('schedDate');
+      const stEl = document.getElementById('schedTime');
+      const sdVal = sdEl && sdEl.value ? sdEl.value.trim() : '';
+      const stVal = stEl && stEl.value ? stEl.value.trim() : '';
+      if (!sdVal || !stVal){ alert('日付と時刻を入力してください'); return; }
+
+      // Load schedule template. Prefer server API /templates which enumerates template files.
+      let tpl = null;
+      try{
+        const r = await fetch('/templates');
+        if (r && r.ok){
+          const j = await r.json();
+          if (j && j.templates && typeof j.templates === 'object'){
+            // Some template files (like schedule.json) are exposed as individual keys
+            // e.g. { mtg_title: "...", mtg_bofy: "..." } in the flattened templates mapping.
+            // If we see mtg_title or mtg_bofy present, assemble tpl from those keys.
+            const t = j.templates;
+            if ((typeof t.mtg_title === 'string' || typeof t.mtg_bofy === 'string' || typeof t.mtg_body === 'string')){
+              tpl = {};
+              if (typeof t.mtg_title === 'string') tpl.mtg_title = t.mtg_title;
+              if (typeof t.mtg_bofy === 'string') tpl.mtg_bofy = t.mtg_bofy;
+              else if (typeof t.mtg_body === 'string') tpl.mtg_bofy = t.mtg_body;
+            } else {
+              // Otherwise try common filename-based keys
+              tpl = t['schedule'] || t['schedule.json'] || null;
+            }
+            // If tpl is a JSON string, try to parse it
+            if (tpl && typeof tpl === 'string'){
+              try{ tpl = JSON.parse(tpl); }catch(e){ /* leave as string */ }
+            }
+          }
+        }
+      }catch(e){ /* ignore */ }
+      // As a last-resort, try fetching the file directly (some deployments may serve static files)
+      if (!tpl){
+        try{ const r2 = await fetch('/template_files/schedule.json'); if (r2 && r2.ok) tpl = await r2.json(); }catch(e){}
+      }
+      if (!tpl){ alert('schedule.json を取得できませんでした'); return; }
+
+      const rawTitle = (typeof tpl.mtg_title === 'string') ? tpl.mtg_title : '';
+      const rawBody = (typeof tpl.mtg_bofy === 'string') ? tpl.mtg_bofy : (typeof tpl.mtg_body === 'string' ? tpl.mtg_body : '');
+
+      // Use existing synchronous placeholder replacer to substitute tokens
+      let title = sanitizeBlankLines(applySyncPlaceholders(rawTitle));
+      let body = sanitizeBlankLines(applySyncPlaceholders(rawBody));
+      // Ensure any unreplaced angle-bracket tokens (e.g. <customer_name>, <sr_number>)
+      // are removed so created appointments do not contain raw placeholders.
+      try{
+        // Remove only simple placeholder tokens like <customer_name>, <sr_number>, <MM+1>
+        // but preserve angle-bracketed URLs such as < https://... > (they contain ':' or '/').
+        const placeholderRe = /<\s*[A-Za-z0-9_]+(?:[+\-]\d+)?\s*>/g;
+        title = title.replace(placeholderRe, '').trim();
+        body = body.replace(placeholderRe, '').trim();
+      }catch(e){ /* ignore */ }
+
+      // Compute ISO datetimes (assume local date/time inputs). End = start + 30 minutes
+      // Parse components to avoid timezone ambiguity
+      const dateMatch = sdVal.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+      const timeMatch = stVal.match(/^(\d{1,2}):(\d{2})$/);
+      if (!dateMatch || !timeMatch){ alert('日付または時刻の形式が不正です'); return; }
+      const yyyy = parseInt(dateMatch[1],10);
+      const mm = parseInt(dateMatch[2],10) - 1;
+      const dd = parseInt(dateMatch[3],10);
+      const hh = parseInt(timeMatch[1],10);
+      const mi = parseInt(timeMatch[2],10);
+      const start = new Date(yyyy, mm, dd, hh, mi, 0, 0);
+      if (!(start instanceof Date) || isNaN(start.getTime())){ alert('開始日時の解析に失敗しました'); return; }
+      const end = new Date(start.getTime() + 30*60*1000);
+      // Format as local naive ISO-like string (no timezone offset) so server/Outlook
+      // interprets the datetime as local time rather than converting from UTC.
+      const pad2 = (n)=>String(n).padStart(2,'0');
+      const formatWithOffset = (d)=>{
+        const base = `${d.getFullYear()}-${pad2(d.getMonth()+1)}-${pad2(d.getDate())}T${pad2(d.getHours())}:${pad2(d.getMinutes())}:00`;
+        // getTimezoneOffset() returns minutes difference UTC - local
+        const offMin = -d.getTimezoneOffset();
+        const sign = offMin >= 0 ? '+' : '-';
+        const absMin = Math.abs(offMin);
+        const oh = String(Math.floor(absMin / 60)).padStart(2,'0');
+        const om = String(absMin % 60).padStart(2,'0');
+        return `${base}${sign}${oh}:${om}`;
+      };
+      const startIso = formatWithOffset(start);
+      const endIso = formatWithOffset(end);
+
+      const payload = { title: title, body: body, start_iso: startIso, end_iso: endIso };
+      try{ console.debug('create_schedule payload ->', payload); }catch(e){}
+      const res = await postJson('/create_schedule', payload);
+      if (res && res.status === 'ok'){ alert('Outlook に予定を作成しました。'); }
+      else {
+        const msg = (res && (res.message || res.error)) ? (res.message || res.error) : JSON.stringify(res);
+        alert('予定作成に失敗しました: ' + msg);
+      }
+    }catch(e){ alert('予定作成に失敗しました: ' + e); }
+  });
+})();
 // Template persistence and modal logic
 const STORAGE_KEY = 'mailTemplates_v1';
 let templatesStore = {};
@@ -273,10 +392,15 @@ async function loadPhoneStatuses(){
       for (const item of j.items){
         if (!item || typeof item.label !== 'string') continue;
         const label = item.label.trim();
-        const value = (typeof item.value === 'string') ? item.value : (item.value != null ? String(item.value) : '');
+        const rawVal = (typeof item.value === 'string') ? item.value : (item.value != null ? String(item.value) : '');
         if (!label) continue;
         if (seen.has(label)) continue;
-        const o = document.createElement('option'); o.value = value; o.textContent = label; select.appendChild(o);
+        const o = document.createElement('option');
+        // set a usable non-empty option.value for browser selection while keeping server-provided raw value
+        o.value = rawVal !== '' ? rawVal : label;
+        o.textContent = label;
+        o.dataset.rawValue = rawVal;
+        select.appendChild(o);
         seen.add(label);
         if (label === '無し' && defaultIndex === -1){
           defaultIndex = select.options.length - 1;
@@ -308,10 +432,14 @@ async function loadMeetingOptions(){
     for (const item of j.items){
       if (!item || typeof item.label !== 'string') continue;
       const label = item.label.trim();
-      const value = (typeof item.value === 'string') ? item.value : (item.value != null ? String(item.value) : '');
+      const rawVal = (typeof item.value === 'string') ? item.value : (item.value != null ? String(item.value) : '');
       if (!label) continue;
       if (seen.has(label)) continue;
-      const o = document.createElement('option'); o.value = value; o.textContent = label; select.appendChild(o);
+      const o = document.createElement('option');
+      o.value = rawVal !== '' ? rawVal : label;
+      o.textContent = label;
+      o.dataset.rawValue = rawVal;
+      select.appendChild(o);
       seen.add(label);
       if (label === '無し' && defaultIndex === -1){
         defaultIndex = select.options.length - 1;
@@ -341,9 +469,13 @@ async function loadNextcOptions(){
     for (const item of j.items){
       if (!item || typeof item.label !== 'string') continue;
       const label = item.label.trim();
-      const value = (typeof item.value === 'string') ? item.value : (item.value != null ? String(item.value) : '');
+      const rawVal = (typeof item.value === 'string') ? item.value : (item.value != null ? String(item.value) : '');
       if (!label) continue;
-      const o = document.createElement('option'); o.value = value; o.textContent = label; select.appendChild(o);
+      const o = document.createElement('option');
+      o.value = rawVal !== '' ? rawVal : label;
+      o.textContent = label;
+      o.dataset.rawValue = rawVal;
+      select.appendChild(o);
       if (label === '無し' && defaultIndex === -1){ defaultIndex = select.options.length - 1; }
     }
     // select '無し' by default if present, otherwise keep first option
@@ -607,9 +739,10 @@ function applyTemplatePlaceholders(template){
             nextc = optVal;
           } else if (optText){
             // when option has no value, try to map the visible label to nextcItems
+            // Use only the server-provided value when available. Do not fall back to visible label.
             const found = (Array.isArray(nextcItems) ? nextcItems.find(it => it && (it.label === optText || it.value === optText)) : null);
-            if (found) nextc = found.value || found.label || optText;
-            else nextc = optText;
+            if (found && typeof found.value === 'string' && found.value.trim() !== '') nextc = found.value;
+            else nextc = '';
           }
         } else {
           nextc = (nextcElem.value || '').trim();
@@ -617,13 +750,12 @@ function applyTemplatePlaceholders(template){
       }
       if (!nextc && Array.isArray(nextcItems) && nextcItems.length){
         const found = nextcItems.find(it => it && it.label === '無し');
-        if (found) nextc = found.value || found.label || '';
+        if (found) nextc = (found && typeof found.value === 'string' && found.value.trim() !== '') ? found.value : '';
       }
     }catch(e){ nextc = ''; }
 
     if (cname){ out = out.replace(/<customer_name>/g, cname); }
     if (sr){ out = out.replace(/<sr_number>/g, sr); }
-    if (titleVal){ out = out.replace(/<sr_title>/g, titleVal); out = out.replace(/\[タイトル\][\s\S]*?●●●●●●●●/g, `[タイトル]\n${titleVal}`); out = out.replace(/<title>/g, titleVal); }
     if (contentVal){ out = out.replace(/<sr_body>/g, contentVal); out = out.replace(/<content>/g, contentVal); }
     // If user selected a schedule date/time, populate <month>, <day>, <weekday>, <time>
     try{
@@ -639,18 +771,49 @@ function applyTemplatePlaceholders(template){
         out = out.replace(/<month>/g, String(months));
         out = out.replace(/<day>/g, String(days));
         out = out.replace(/<weekday>/g, String(w));
-        if (st) out = out.replace(/<time>/g, st);
+        // time handling: support <time> and <time+N> (minutes offset). Format HH:MM
+        const formatTimeWithOffset = (base, offsetMinutes)=>{
+          if (!base) return '';
+          const m = (''+base).toString().match(/^(\d{1,2}):(\d{2})$/);
+          if (!m) return base;
+          let hh = parseInt(m[1],10); let mm = parseInt(m[2],10);
+          let total = hh*60 + mm + (offsetMinutes || 0);
+          const dayMinutes = 24*60;
+          total = ((total % dayMinutes) + dayMinutes) % dayMinutes;
+          const rh = String(Math.floor(total/60)).padStart(2,'0');
+          const rm = String(total%60).padStart(2,'0');
+          return `${rh}:${rm}`;
+        };
+        if (st){
+          // replace <time+N> and <time-N> (allow spaces and full-width signs)
+          out = out.replace(/<\s*time\s*([+＋\-－])\s*(\d+)\s*>/gi, function(_, sign, mins){
+            const n = parseInt(mins || '0', 10) || 0;
+            const offset = (sign === '+' || sign === '＋') ? n : -n;
+            return formatTimeWithOffset(st, offset);
+          });
+          out = out.replace(/<\s*time\s*>/gi, function(){ return formatTimeWithOffset(st, 0); });
+        }
       }
     }catch(e){ /* ignore */ }
     if (nextc){ out = out.replace(/<nextc>/g, nextc); out = out.replace(/<nextC>/g, nextc); }
 
-    // phone status placeholder handling: if phone_status is empty, remove lines containing the token
+    // phone status placeholder handling: prefer server-provided raw value (dataset.rawValue).
+    // If the raw value is empty (explicit ''), treat as empty and remove lines containing the token.
     try{
-      const phoneVal = document.getElementById('phoneStatus') ? document.getElementById('phoneStatus').value.trim() : '';
-      if (phoneVal){ out = out.replace(/<phone_status>/g, phoneVal); }
-      else {
-        out = out.split(/\r?\n/).filter(line => !line.includes('<phone_status>')).join('\n');
+      const phoneSelect = document.getElementById('phoneStatus');
+      let phoneVal = '';
+      if (phoneSelect){
+        const selIdx = phoneSelect.selectedIndex >= 0 ? phoneSelect.selectedIndex : 0;
+        const opt = phoneSelect.options && phoneSelect.options[selIdx] ? phoneSelect.options[selIdx] : null;
+        if (opt && typeof opt.dataset.rawValue === 'string'){
+          phoneVal = opt.dataset.rawValue.trim();
+        } else if (opt){
+          phoneVal = (opt.value || '').toString().trim();
+        }
       }
+      const norm = (phoneVal || '').toString();
+      if (norm){ out = out.replace(/<phone_status>/g, phoneVal); }
+      else { out = out.replace(/<phone_status>/g, ''); }
     }catch(e){ /* ignore */ }
 
     // meeting offer handling: replace <offer_meeting> with selected meetingStatus value.
@@ -659,22 +822,20 @@ function applyTemplatePlaceholders(template){
       const meetingSelect = document.getElementById('meetingStatus');
       let meetingVal = '';
       if (meetingSelect){
-        meetingVal = (meetingSelect.value || '').toString().trim();
-        if (!meetingVal && meetingSelect.selectedIndex >= 0){
-          meetingVal = (meetingSelect.options[meetingSelect.selectedIndex].textContent || '').toString().trim();
-        }
-        if (!meetingVal && meetingSelect.options && meetingSelect.options.length){
-          meetingVal = (meetingSelect.options[0].textContent || '').toString().trim();
-        }
+        // Prefer server-provided raw value stored in dataset.rawValue. If absent, fall back to displayed text.
+        const selIdx = meetingSelect.selectedIndex >= 0 ? meetingSelect.selectedIndex : 0;
+        const opt = meetingSelect.options && meetingSelect.options[selIdx] ? meetingSelect.options[selIdx] : null;
+        let raw = '';
+        if (opt && typeof opt.dataset.rawValue === 'string') raw = opt.dataset.rawValue.trim();
+        if (raw) meetingVal = raw;
+        else if (opt) meetingVal = (opt.textContent || '').toString().trim();
       }
       const norm = (meetingVal || '').toString().trim();
       if (norm && norm !== '無し'){
         out = out.replace(/<\s*offer_meeting\s*>/g, function(){ return '\n' + meetingVal + '\n'; });
       } else {
-        // replace the token line with two newlines (paragraph separator) and normalize
-        out = out.replace(/\r?\n?\s*<\s*offer_meeting\s*>\s*\r?\n?/g, '\n\n');
-        // collapse excessive blank lines back to at most one blank line between paragraphs
-        out = out.replace(/\n{3,}/g, '\n\n');
+        // Do not remove entire lines; replace token with empty string
+        out = out.replace(/<\s*offer_meeting\s*>/g, '');
       }
     }catch(e){ /* ignore */ }
 
@@ -735,20 +896,36 @@ function applyTemplatePlaceholders(template){
         // fallback to today
         const t = new Date(); dt = new Date(t.getFullYear(), t.getMonth(), t.getDate());
       }
-      if (offset <= 0) return dt;
-      let remaining = offset;
-      while(remaining > 0){
-        dt.setDate(dt.getDate() + 1);
-        const yyyy = dt.getFullYear();
-        const mm = String(dt.getMonth() + 1).padStart(2, '0');
-        const dd = String(dt.getDate()).padStart(2, '0');
-        const iso = `${yyyy}-${mm}-${dd}`;
-        const day = dt.getDay();
-        const isWeekend = (day === 0 || day === 6);
-        const isHoliday = holidaysSet.has(iso);
-        if (!isWeekend && !isHoliday){ remaining--; }
+      // If offset is zero return same date. If positive, step forward; if negative, step backward.
+      if (!offset || offset === 0) return dt;
+      let remaining = Math.abs(offset);
+      if (offset > 0){
+        while(remaining > 0){
+          dt.setDate(dt.getDate() + 1);
+          const yyyy = dt.getFullYear();
+          const mm = String(dt.getMonth() + 1).padStart(2, '0');
+          const dd = String(dt.getDate()).padStart(2, '0');
+          const iso = `${yyyy}-${mm}-${dd}`;
+          const day = dt.getDay();
+          const isWeekend = (day === 0 || day === 6);
+          const isHoliday = holidaysSet.has(iso);
+          if (!isWeekend && !isHoliday){ remaining--; }
+        }
+        return dt;
+      } else {
+        while(remaining > 0){
+          dt.setDate(dt.getDate() - 1);
+          const yyyy = dt.getFullYear();
+          const mm = String(dt.getMonth() + 1).padStart(2, '0');
+          const dd = String(dt.getDate()).padStart(2, '0');
+          const iso = `${yyyy}-${mm}-${dd}`;
+          const day = dt.getDay();
+          const isWeekend = (day === 0 || day === 6);
+          const isHoliday = holidaysSet.has(iso);
+          if (!isWeekend && !isHoliday){ remaining--; }
+        }
+        return dt;
       }
-      return dt;
     };
     // Use Monday-first weekday labels to match server-side compute_business_day_py (Monday=0)
     const weekdays = ['月','火','水','木','金','土','日'];
@@ -762,26 +939,36 @@ function applyTemplatePlaceholders(template){
       out = out.replace(/<MM>/g, String(baseMM));
       out = out.replace(/<DD>/g, String(baseDD));
       out = out.replace(/<AA>/g, baseAA);
-      for (let n=1;n<=5;n++){
+      // Replace arbitrary offset tokens like <MM+N>, <MM-N>, <DD+N>, <AA-N> etc.
+      const replaceOffsetTokens = (text, startDate, holidaysSet)=>{
         try{
-          const dt = computeBusinessDay(today, n, holidaysSet);
-          const mmn = dt.getMonth() + 1;
-          const ddn = dt.getDate();
-          const aan = weekdays[(dt.getDay() + 6) % 7];
-          out = out.replace(new RegExp(`<MM\\+${n}>`,`g`), String(mmn));
-          out = out.replace(new RegExp(`<\\s*MM\\s*\\+\\s*${n}\\s*>`,`g`), String(mmn));
-          out = out.replace(new RegExp(`<MM＋${n}>`,`g`), String(mmn));
-          out = out.replace(new RegExp(`<\\s*MM\\s*＋\\s*${n}\\s*>`,`g`), String(mmn));
-          out = out.replace(new RegExp(`<DD\\+${n}>`,`g`), String(ddn));
-          out = out.replace(new RegExp(`<\\s*DD\\s*\\+\\s*${n}\\s*>`,`g`), String(ddn));
-          out = out.replace(new RegExp(`<DD＋${n}>`,`g`), String(ddn));
-          out = out.replace(new RegExp(`<\\s*DD\\s*＋\\s*${n}\\s*>`,`g`), String(ddn));
-          out = out.replace(new RegExp(`<AA\\+${n}>`,`g`), aan);
-          out = out.replace(new RegExp(`<\\s*AA\\s*\\+\\s*${n}\\s*>`,`g`), aan);
-          out = out.replace(new RegExp(`<AA＋${n}>`,`g`), aan);
-          out = out.replace(new RegExp(`<\\s*AA\\s*＋\\s*${n}\\s*>`,`g`), aan);
-        }catch(e){ }
-      }
+          // Patterns: allow ASCII +/- and full-width +/− (＋, －)
+          const signedNum = /([+\uFF0B\-\uFF0D\u2212\u2213\uFF0B\uFF0D])/; // simplified
+          // MM offsets
+          text = text.replace(/<\s*MM\s*([+＋\-－])\s*(\d+)\s*>/gi, function(_, sign, num){
+            const n = parseInt(num,10);
+            const offset = (sign === '+' || sign === '＋') ? n : -n;
+            const dt = computeBusinessDay(startDate, offset, holidaysSet);
+            return String(dt.getMonth() + 1);
+          });
+          // DD offsets
+          text = text.replace(/<\s*DD\s*([+＋\-－])\s*(\d+)\s*>/gi, function(_, sign, num){
+            const n = parseInt(num,10);
+            const offset = (sign === '+' || sign === '＋') ? n : -n;
+            const dt = computeBusinessDay(startDate, offset, holidaysSet);
+            return String(dt.getDate());
+          });
+          // AA offsets (weekday labels, align with Monday-first mapping used elsewhere)
+          text = text.replace(/<\s*AA\s*([+＋\-－])\s*(\d+)\s*>/gi, function(_, sign, num){
+            const n = parseInt(num,10);
+            const offset = (sign === '+' || sign === '＋') ? n : -n;
+            const dt = computeBusinessDay(startDate, offset, holidaysSet);
+            return weekdays[(dt.getDay() + 6) % 7];
+          });
+          return text;
+        }catch(e){ return text; }
+      };
+      out = replaceOffsetTokens(out, today, holidaysSet);
       // ensure footer tokens are resolved synchronously as well
       try{
         const footerVal = document.getElementById('footer') ? document.getElementById('footer').value.trim() : '';
@@ -819,25 +1006,11 @@ function applyTemplatePlaceholders(template){
       out = out.replace(/<MM>/g, String(baseMM));
       out = out.replace(/<DD>/g, String(baseDD));
       out = out.replace(/<AA>/g, baseAA);
-        for (let n=1;n<=5;n++){
-        const dt = computeBusinessDay(today, n, holidaysSet);
-        const mmn = dt.getMonth() + 1;
-        const ddn = dt.getDate();
-        const aan = weekdays[(dt.getDay() + 6) % 7];
-        try{ const iso = `${dt.getFullYear()}-${String(mmn).padStart(2,'0')}-${String(ddn).padStart(2,'0')}`; console.debug(`business day +${n}:`, iso, aan); }catch(e){}
-        out = out.replace(new RegExp(`<MM\\+${n}>`,`g`), String(mmn));
-        out = out.replace(new RegExp(`<\\s*MM\\s*\\+\\s*${n}\\s*>`,`g`), String(mmn));
-        out = out.replace(new RegExp(`<MM＋${n}>`,`g`), String(mmn));
-        out = out.replace(new RegExp(`<\\s*MM\\s*＋\\s*${n}\\s*>`,`g`), String(mmn));
-        out = out.replace(new RegExp(`<DD\\+${n}>`,`g`), String(ddn));
-        out = out.replace(new RegExp(`<\\s*DD\\s*\\+\\s*${n}\\s*>`,`g`), String(ddn));
-        out = out.replace(new RegExp(`<DD＋${n}>`,`g`), String(ddn));
-        out = out.replace(new RegExp(`<\\s*DD\\s*＋\\s*${n}\\s*>`,`g`), String(ddn));
-        out = out.replace(new RegExp(`<AA\\+${n}>`,`g`), aan);
-        out = out.replace(new RegExp(`<\\s*AA\\s*\\+\\s*${n}\\s*>`,`g`), aan);
-        out = out.replace(new RegExp(`<AA＋${n}>`,`g`), aan);
-        out = out.replace(new RegExp(`<\\s*AA\\s*＋\\s*${n}\\s*>`,`g`), aan);
-      }
+        // Support arbitrary offsets like <MM+N>, <MM-N>, <DD+N>, <AA-N> etc. using replaceOffsetTokens
+        out = (function(){ try{ return out; }catch(e){ return out; } })();
+        out = (function(txt){ try{ return txt; }catch(e){ return txt; } })(out);
+        // call helper defined above to replace offset tokens
+        try{ out = replaceOffsetTokens(out, today, holidaysSet); }catch(e){}
       // After async replacements, ensure footer tokens are also resolved
       try{
         const footerVal = document.getElementById('footer') ? document.getElementById('footer').value.trim() : '';
@@ -892,7 +1065,6 @@ function applyTemplatePlaceholders(template){
 
   if (cname){ out = out.replace(/<customer_name>/g, cname); }
   if (sr){ out = out.replace(/<sr_number>/g, sr); }
-  if (titleVal){ out = out.replace(/<sr_title>/g, titleVal); out = out.replace(/\[タイトル\][\s\S]*?●●●●●●●●/g, `[タイトル]\n${titleVal}`); out = out.replace(/<title>/g, titleVal); }
   if (contentVal){ out = out.replace(/<sr_body>/g, contentVal); out = out.replace(/<content>/g, contentVal); }
   if (nextc){ out = out.replace(/<nextc>/g, nextc); out = out.replace(/<nextC>/g, nextc); }
 
@@ -900,10 +1072,7 @@ function applyTemplatePlaceholders(template){
   try{
     const phoneVal = document.getElementById('phoneStatus') ? document.getElementById('phoneStatus').value.trim() : '';
     if (phoneVal){ out = out.replace(/<phone_status>/g, phoneVal); }
-    else {
-      // remove any lines containing <phone_status> (handles CRLF and LF)
-      out = out.split(/\r?\n/).filter(line => !line.includes('<phone_status>')).join('\n');
-    }
+    else { out = out.replace(/<phone_status>/g, ''); }
   }catch(e){ /* ignore */ }
 
   // meeting offer handling: replace <offer_meeting> with selected meetingStatus value.
@@ -922,8 +1091,7 @@ function applyTemplatePlaceholders(template){
     if (norm && norm !== '無し'){
       out = out.replace(/<\s*offer_meeting\s*>/g, function(){ return '\n' + meetingVal + '\n'; });
     } else {
-      out = out.replace(/\r?\n?\s*<\s*offer_meeting\s*>\s*\r?\n?/g, '\n');
-      out = out.replace(/\n{3,}/g, '\n\n');
+      out = out.replace(/<\s*offer_meeting\s*>/g, '');
     }
   }catch(e){ /* ignore */ }
 
@@ -1030,12 +1198,11 @@ function applySyncPlaceholders(template){
       }
       if (!nextc && Array.isArray(nextcItems) && nextcItems.length){
         const found = nextcItems.find(it => it && it.label === '無し');
-        if (found) nextc = found.value || found.label || '';
+        if (found) nextc = (found && typeof found.value === 'string' && found.value.trim() !== '') ? found.value : '';
       }
     }catch(e){}
 
     if (cname){ out = out.replace(/<customer_name>/g, cname); }
-    if (sr){ out = out.replace(/<sr_number>/g, sr); out = out.replace(/●●●●●●●●/g, sr); }
     if (titleVal){ out = out.replace(/<sr_title>/g, titleVal); out = out.replace(/<title>/g, titleVal); }
     if (contentVal){ out = out.replace(/<sr_body>/g, contentVal); out = out.replace(/<content>/g, contentVal); }
     if (nextc){ out = out.replace(/<nextc>/g, nextc); out = out.replace(/<nextC>/g, nextc); }
@@ -1054,7 +1221,27 @@ function applySyncPlaceholders(template){
         out = out.replace(/<month>/g, String(months));
         out = out.replace(/<day>/g, String(days));
         out = out.replace(/<weekday>/g, String(w));
-        if (st) out = out.replace(/<time>/g, st);
+        // time handling: support <time> and <time+N> (minutes offset). Format HH:MM
+        const formatTimeWithOffset = (base, offsetMinutes)=>{
+          if (!base) return '';
+          const m = (''+base).toString().match(/^(\d{1,2}):(\d{2})$/);
+          if (!m) return base;
+          let hh = parseInt(m[1],10); let mm = parseInt(m[2],10);
+          let total = hh*60 + mm + (offsetMinutes || 0);
+          const dayMinutes = 24*60;
+          total = ((total % dayMinutes) + dayMinutes) % dayMinutes;
+          const rh = String(Math.floor(total/60)).padStart(2,'0');
+          const rm = String(total%60).padStart(2,'0');
+          return `${rh}:${rm}`;
+        };
+        if (st){
+          out = out.replace(/<\s*time\s*([+＋\-－])\s*(\d+)\s*>/gi, function(_, sign, mins){
+            const n = parseInt(mins || '0', 10) || 0;
+            const offset = (sign === '+' || sign === '＋') ? n : -n;
+            return formatTimeWithOffset(st, offset);
+          });
+          out = out.replace(/<\s*time\s*>/gi, function(){ return formatTimeWithOffset(st, 0); });
+        }
       }
     }catch(e){ /* ignore */ }
 
@@ -1064,15 +1251,27 @@ function applySyncPlaceholders(template){
       let phoneVal = '';
       const phoneElem = document.getElementById('phoneStatus');
       if (phoneElem){
-        if (phoneElem.selectedIndex >= 0) phoneVal = (phoneElem.options[phoneElem.selectedIndex].textContent || '').trim();
-        else phoneVal = (phoneElem.value || '').trim();
+        if (phoneElem.selectedIndex >= 0){
+          const opt = phoneElem.options[phoneElem.selectedIndex];
+          const raw = opt && typeof opt.dataset.rawValue === 'string' ? opt.dataset.rawValue.trim() : '';
+          // Use server-provided raw value only. Do not use the visible label as a fallback.
+          if (raw) phoneVal = raw;
+          else phoneVal = '';
+        } else {
+          // No selected index: try to match the select's value to a known item value
+          const valCandidate = (phoneElem.value || '').trim();
+          if (valCandidate && Array.isArray(phoneItems)){
+            const match = phoneItems.find(it => it && typeof it.value === 'string' && it.value === valCandidate);
+            if (match && typeof match.value === 'string' && match.value.trim() !== '') phoneVal = match.value;
+          }
+        }
       }
       if (!phoneVal && Array.isArray(phoneItems) && phoneItems.length){
         const found = phoneItems.find(it => it && it.label === '無し');
-        if (found) phoneVal = found.label;
+        if (found && typeof found.value === 'string' && found.value.trim() !== '') phoneVal = found.value;
       }
       if (phoneVal){ out = out.replace(/<phone_status>/g, phoneVal); }
-      else { out = out.split(/\r?\n/).filter(line => !line.includes('<phone_status>')).join('\n'); }
+      else { out = out.replace(/<phone_status>/g, ''); }
     }catch(e){ }
 
     // meeting offer handling (prefer selected value/label)
@@ -1081,20 +1280,23 @@ function applySyncPlaceholders(template){
       const meetingSelect = document.getElementById('meetingStatus');
       let meetingVal = '';
       if (meetingSelect){
-        if (meetingSelect.selectedIndex >= 0) meetingVal = (meetingSelect.options[meetingSelect.selectedIndex].textContent || '').toString().trim();
-        else meetingVal = (meetingSelect.value || '').toString().trim();
+        const selIdx = meetingSelect.selectedIndex >= 0 ? meetingSelect.selectedIndex : 0;
+        const opt = meetingSelect.options && meetingSelect.options[selIdx] ? meetingSelect.options[selIdx] : null;
+        let raw = '';
+        if (opt && typeof opt.dataset.rawValue === 'string') raw = opt.dataset.rawValue.trim();
+        if (raw) meetingVal = raw;
+        else if (opt) meetingVal = (opt.textContent || '').toString().trim();
       }
       // If server provided meeting list and no selection, try to use its first non-empty label
       if (!meetingVal && Array.isArray(meetingItems) && meetingItems.length){
         const first = meetingItems[0];
-        if (first && first.label) meetingVal = first.label.toString().trim();
+        if (first && typeof first.value === 'string' && first.value.trim() !== '') meetingVal = first.value.toString().trim();
       }
       const norm = (meetingVal || '').toString().trim();
       if (norm && norm !== '無し'){
         out = out.replace(/<offer_meeting>/g, meetingVal);
       } else {
-        out = out.replace(/\r?\n?\s*<\s*offer_meeting\s*>\s*\r?\n?/g, '\n\n');
-        out = out.replace(/\n{3,}/g, '\n\n');
+        out = out.replace(/<offer_meeting>/g, '');
       }
     }catch(e){ }
 
@@ -1144,7 +1346,7 @@ function applySyncPlaceholders(template){
       }
     }catch(e){ }
   }catch(e){ /* ignore */ }
-  return out;
+  try{ return sanitizeBlankLines(out); }catch(e){ return out; }
 }
 
 // Try server-side rendering of template (dates/business-day). Returns rendered string or null on failure.
@@ -1162,15 +1364,19 @@ async function renderWithServer(template){
 function sanitizeBlankLines(str){
   try{
     // normalize CRLF to LF
+    // Work in LF internally for simplicity
     str = str.replace(/\r\n?/g, '\n');
     // trim trailing spaces on each line
     str = str.replace(/[ \t]+$/gm, '');
-    // collapse 3+ consecutive newlines into two (allow one blank line between paragraphs)
-    str = str.replace(/\n{3,}/g, '\n\n');
+    // (removed) previously collapsed 3+ consecutive newlines into two — keep original spacing
     // remove leading blank lines
     str = str.replace(/^\s*\n+/, '');
     // reduce trailing newlines to a single newline
     str = str.replace(/\n{2,}$/, '\n');
+    // Finally convert normalized LF back to CRLF for output consistency
+    try{ str = str.replace(/\n/g, '\r\n'); }catch(e){}
+    // Ensure the string ends with a single CRLF
+    if (!str.endsWith('\r\n')) str = str + '\r\n';
     return str;
   }catch(e){ return str; }
 }
@@ -1185,8 +1391,8 @@ function replaceFooterToken(out, footerVal){
       if (/\n\s*\n$/.test(before)) return footerVal + '\n';
       // if there is a single newline, make it one blank line before footer
       if (/\n$/.test(before)) return '\n' + footerVal + '\n';
-      // otherwise ensure two newlines before footer
-      return '\n\n' + footerVal + '\n';
+      // otherwise ensure at least one newline before footer (do not force two)
+      return '\n' + footerVal + '\n';
     });
   }catch(e){ return out; }
 }
@@ -1199,7 +1405,8 @@ function replaceTantoWithFooter(out, regex, footerVal){
       const before = string.slice(0, offset);
       if (/\n\s*\n$/.test(before)) return footerVal + '\n';
       if (/\n$/.test(before)) return '\n' + footerVal + '\n';
-      return '\n\n' + footerVal + '\n';
+      // no trailing newline before match: ensure a single newline only
+      return '\n' + footerVal + '\n';
     });
   }catch(e){ return out; }
 }
@@ -1217,7 +1424,7 @@ function replaceFooterBlock(out, footerVal, additionalVal, fcsVal){
     const tokenSeq = /<\s*footer\s*>\s*(?:\r?\n)?\s*(?:<\s*additional_footer\s*>\s*(?:\r?\n)?\s*)?(?:<\s*fcs_footer\s*>\s*(?:\r?\n)?\s*)?/gi;
     return out.replace(tokenSeq, function(match, offset, string){
       const before = string.slice(0, offset);
-      let prefix = '\n\n';
+      let prefix = '\n';
       if (/\n\s*\n$/.test(before)) prefix = '';
       else if (/\n$/.test(before)) prefix = '\n';
       const parts = [];
@@ -1255,20 +1462,16 @@ function ensureFooterSpacing(out, footerVal, additionalVal, fcsVal){
     // if combined block not found, try with footerVal only
     if (idx === -1 && footerVal) idx = out.indexOf(footerVal);
     if (idx === -1) return out;
-    // ensure at least one blank line before idx
-    // find char before block
+    // ensure at least one blank line before idx (do not force two)
     const beforeIdx = idx - 1;
     if (beforeIdx < 0) return out; // start of string
     const beforeChar = out[beforeIdx];
     if (beforeChar === '\n'){
-      // check previous char
-      const prev = beforeIdx - 1;
-      if (prev >= 0 && out[prev] === '\n') return out; // already blank line
-      // insert one more newline
-      return out.slice(0, idx) + '\n' + out.slice(idx);
+      // there's at least one newline before block -> OK
+      return out;
     } else {
-      // insert two newlines before block
-      return out.slice(0, idx) + '\n\n' + out.slice(idx);
+      // insert a single newline before block
+      return out.slice(0, idx) + '\n' + out.slice(idx);
     }
   }catch(e){ return out; }
 }

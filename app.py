@@ -6,6 +6,8 @@ import re
 from datetime import datetime, timedelta, date
 import traceback
 import threading
+import time
+import hashlib
 
 
 def dbg(msg):
@@ -21,6 +23,11 @@ def dbg(msg):
             pass
 
 app = Flask(__name__)
+
+# Short-lived in-memory cache to deduplicate near-duplicate schedule requests.
+# Keys are SHA256(title+body+start+end) -> timestamp (time.time()).
+recent_schedules = {}
+recent_schedules_lock = threading.Lock()
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, 'config.json')
@@ -234,6 +241,333 @@ def create_mail():
         return jsonify({'status': 'ok', 'message': 'Mail creation started.'})
     except Exception as e:
         return jsonify({'status': 'error', 'message': f'Failed to create mail: {e}'}), 500
+
+
+@app.route('/create_schedule', methods=['POST'])
+def create_schedule():
+    data = request.json or {}
+    title = data.get('title', '')
+    body = data.get('body', '')
+    start_iso = data.get('start_iso')
+    end_iso = data.get('end_iso')
+    if not start_iso or not end_iso:
+        return jsonify({'status': 'error', 'message': 'start_iso and end_iso are required'}), 400
+
+    # Only attempt Outlook automation on Windows
+    if platform.system() != 'Windows':
+        return jsonify({'status': 'error', 'message': 'Outlook scheduling is only supported on Windows.'}), 400
+
+    try:
+        # compute a short-lived dedupe key for this schedule request
+        try:
+            h_in = (title or '') + '||' + (body or '') + '||' + (start_iso or '') + '||' + (end_iso or '')
+            key = hashlib.sha256(h_in.encode('utf-8')).hexdigest()
+        except Exception:
+            key = None
+
+        if key:
+            nowt = time.time()
+            with recent_schedules_lock:
+                # remove expired entries
+                expired = [k for k, v in recent_schedules.items() if nowt - v > 30]
+                for ex in expired:
+                    try:
+                        recent_schedules.pop(ex, None)
+                    except Exception:
+                        pass
+                if key in recent_schedules:
+                    dbg(f"create_schedule duplicate blocked key={key}")
+                    return jsonify({'status': 'error', 'message': 'Duplicate schedule request blocked'}), 429
+                recent_schedules[key] = nowt
+        import win32com.client
+        import pythoncom
+
+        def _create_appointment(sbj, bd, st_iso, en_iso):
+            # Simplified COM lifecycle: initialize, perform actions, always uninitialize
+            try:
+                pythoncom.CoInitialize()
+            except Exception:
+                # if CoInitialize fails, bail out
+                try:
+                    dbg('pythoncom.CoInitialize failed')
+                except Exception:
+                    pass
+                return
+
+            try:
+                # Main appointment creation logic encapsulated in a try/except
+                try:
+                    dbg(f"create_schedule received start_iso={st_iso} end_iso={en_iso}")
+                except Exception:
+                    pass
+
+                try:
+                    outlook = win32com.client.Dispatch('Outlook.Application')
+                    appt = outlook.CreateItem(1)  # olAppointmentItem
+                except Exception:
+                    try:
+                        dbg('Failed to create Outlook appointment item')
+                    except Exception:
+                        pass
+                    return
+
+                # Subject
+                try:
+                    if sbj:
+                        s = sbj.replace('\r', '\n')
+                        s = s.replace('\n', ' ').strip()
+                        appt.Subject = s
+                except Exception:
+                    try:
+                        appt.Subject = (sbj or '').strip()
+                    except Exception:
+                        pass
+
+                # Body representations
+                def _normalize_plain_text(x):
+                    try:
+                        if not x:
+                            return ''
+                        t = x.replace('\r\n', '\n').replace('\r', '\n')
+                        parts = t.split('\n')
+                        while parts and parts[-1].strip() == '':
+                            parts.pop()
+                        return '\r\n'.join(parts)
+                    except Exception:
+                        return x or ''
+
+                plain = _normalize_plain_text(bd)
+                # Ensure CRLF for plain text to give Outlook the expected line endings
+                def _ensure_crlf(x):
+                    try:
+                        if not x:
+                            return ''
+                        t = x.replace('\r\n', '\n').replace('\r', '\n')
+                        return '\r\n'.join(t.split('\n'))
+                    except Exception:
+                        return x or ''
+
+                plain_crlf = _ensure_crlf(plain)
+                try:
+                    dbg(f"plain_crlf repr={repr(plain_crlf)[:400]}")
+                except Exception:
+                    pass
+                html_wrapped = None
+                try:
+                    def html_escape(s):
+                        return (s or '').replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+
+                    def _url_to_anchor(m):
+                        url = m.group(0)
+                        href = url if re.match(r'^[a-zA-Z][a-zA-Z0-9+.-]*://', url) else 'http://' + url
+                        safe = href.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+                        return f'<a href="{safe}">{html_escape(url)}</a>'
+
+                    url_re = re.compile(r'(?:(?:https?://)|(?:www\.)|(?:[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}))(?:[\w\-\./?%&=+#~:,;@!$\(\)\[\]\\]*)')
+                    out_lines = []
+                    # Use the CRLF-normalized plain and split on CRLF for HTML lines
+                    for ln in plain_crlf.split('\r\n'):
+                        esc = html_escape(ln)
+                        anchored = url_re.sub(_url_to_anchor, esc)
+                        out_lines.append(anchored)
+                    body_html = '<br/>'.join(out_lines)
+                    # Prefer Yu Gothic at 10pt, fall back to Meiryo / MS PGothic / sans-serif
+                    font_css = "font-family: 'Yu Gothic', 'YuGothic', 'Yu Gothic UI', 'Meiryo', 'MS PGothic', sans-serif; font-size:10pt;"
+                    html_wrapped = f"<div style=\"{font_css} white-space:normal; line-height:1.35; margin:0; padding:0;\">{body_html}</div>"
+                except Exception:
+                    html_wrapped = None
+
+                # Set plain body first
+                try:
+                    appt.Body = plain_crlf
+                except Exception:
+                    try:
+                        appt.Body = _ensure_crlf(bd or '')
+                    except Exception:
+                        pass
+
+                # Date parsing helper
+                def parse_iso_to_local_naive(s):
+                    if not s:
+                        return None
+                    try:
+                        if s.endswith('Z') or '+' in s[10:] or '-' in s[10:]:
+                            s2 = s.replace('Z', '+00:00') if s.endswith('Z') else s
+                            dt = datetime.fromisoformat(s2)
+                            if dt.tzinfo is not None:
+                                try:
+                                    dt = dt.astimezone().replace(tzinfo=None)
+                                except Exception:
+                                    dt = dt.replace(tzinfo=None)
+                            return dt
+                        try:
+                            return datetime.strptime(s, '%Y-%m-%dT%H:%M:%S')
+                        except Exception:
+                            try:
+                                base = s.split('.')[0]
+                                return datetime.strptime(base, '%Y-%m-%dT%H:%M:%S')
+                            except Exception:
+                                return None
+                    except Exception:
+                        return None
+
+                st_dt = parse_iso_to_local_naive(st_iso)
+                en_dt = parse_iso_to_local_naive(en_iso)
+                try:
+                    dbg(f"parsed start_dt={st_dt} end_dt={en_dt}")
+                except Exception:
+                    pass
+
+                if st_dt:
+                    try:
+                        import pywintypes
+                        appt.Start = pywintypes.Time(st_dt)
+                        try:
+                            appt.Start = st_dt.strftime('%Y-%m-%d %H:%M:%S')
+                        except Exception:
+                            pass
+                    except Exception:
+                        try:
+                            appt.Start = st_dt
+                        except Exception:
+                            try:
+                                appt.Start = st_dt.strftime('%Y-%m-%d %H:%M')
+                            except Exception:
+                                pass
+
+                if en_dt:
+                    try:
+                        import pywintypes
+                        appt.End = pywintypes.Time(en_dt)
+                        try:
+                            appt.End = en_dt.strftime('%Y-%m-%d %H:%M:%S')
+                        except Exception:
+                            pass
+                    except Exception:
+                        try:
+                            appt.End = en_dt
+                        except Exception:
+                            try:
+                                appt.End = en_dt.strftime('%Y-%m-%d %H:%M')
+                            except Exception:
+                                pass
+
+                # Reminder and display
+                try:
+                    try:
+                        appt.ReminderSet = True
+                        appt.ReminderMinutesBeforeStart = 15
+                    except Exception:
+                        pass
+
+                    try:
+                        # Log EntryID before display (may be None/raise if not saved)
+                        try:
+                            entry_before = getattr(appt, 'EntryID', None)
+                            dbg(f"appt.EntryID before display = {entry_before}")
+                        except Exception:
+                            entry_before = None
+                        appt.Display(False)
+                        try:
+                            try:
+                                insp = appt.GetInspector
+                                try:
+                                    editor = insp.WordEditor
+                                    try:
+                                        editor.Content.Font.Name = 'Yu Gothic'
+                                        editor.Content.Font.Size = 10
+                                        dbg('Set WordEditor font to Yu Gothic 10pt')
+                                    except Exception:
+                                        dbg('Failed to set editor font properties')
+                                except Exception:
+                                    pass
+                            except Exception:
+                                pass
+                        except Exception:
+                            pass
+                    except Exception:
+                        try:
+                            appt.Display()
+                        except Exception:
+                            pass
+
+                    try:
+                        import time as _time
+                        _time.sleep(0.25)
+                    except Exception:
+                        pass
+
+                    if html_wrapped:
+                        try:
+                            try:
+                                # 2 corresponds to olFormatHTML in Outlook constants
+                                appt.BodyFormat = 2
+                            except Exception:
+                                pass
+                            # strengthen font specification by wrapping in <font> as Outlook may prefer font tags
+                            try:
+                                font_wrapper = f"<font face=\"Yu Gothic, YuGothic, 'Yu Gothic UI', Meiryo, 'MS PGothic'\" style=\"font-size:10pt; line-height:1.4;\">{body_html}</font>"
+                                full_html = f"<div style=\"font-family: Yu Gothic, YuGothic, 'Yu Gothic UI', Meiryo, 'MS PGothic', sans-serif; font-size:10pt; line-height:1.4; margin:0; padding:0;\">{font_wrapper}</div>"
+                            except Exception:
+                                full_html = html_wrapped
+                            appt.HTMLBody = full_html
+                            # Log EntryID after HTML update to help detect duplicates
+                            try:
+                                entry_after_html = getattr(appt, 'EntryID', None)
+                                dbg(f"appt.EntryID after HTMLBody set = {entry_after_html}")
+                            except Exception:
+                                entry_after_html = None
+                            # Do not call Save unconditionally — calling Save after Display can cause duplicate items
+                            # If the item appears to be unsaved (EntryID is None or empty), attempt Save once.
+                            try:
+                                entry_post = getattr(appt, 'EntryID', None)
+                            except Exception:
+                                entry_post = None
+                            try:
+                                if not entry_post:
+                                    try:
+                                        appt.Save()
+                                        dbg(f"appt.Save() called for tentative EntryID after save = {getattr(appt, 'EntryID', None)}")
+                                    except Exception:
+                                        dbg('appt.Save() failed or raised')
+                                else:
+                                    dbg(f"appt already had EntryID, skipping Save: {entry_post}")
+                            except Exception:
+                                pass
+                        except Exception:
+                            pass
+                except Exception:
+                    try:
+                        dbg('Error while displaying or saving appointment')
+                    except Exception:
+                        pass
+
+            except Exception as e:
+                try:
+                    dbg(f"_create_appointment unexpected error: {e}")
+                except Exception:
+                    pass
+            finally:
+                try:
+                    pythoncom.CoUninitialize()
+                except Exception:
+                    pass
+                # remove dedupe key so subsequent identical requests are allowed after work is done
+                try:
+                    if key:
+                        with recent_schedules_lock:
+                            try:
+                                recent_schedules.pop(key, None)
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+
+        t = threading.Thread(target=_create_appointment, args=(title, body, start_iso, end_iso), daemon=True)
+        t.start()
+        return jsonify({'status': 'ok', 'message': 'Schedule creation started.'})
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': f'Failed to create schedule: {e}'}), 500
 
 
 @app.route('/templates', methods=['GET'])
@@ -761,7 +1095,9 @@ def phone_statuses():
         elif isinstance(j, list):
             for entry in j:
                 if isinstance(entry, dict) and 'label' in entry:
-                    items.append({'label': entry.get('label'), 'value': entry.get('value', '')})
+                    # Preserve label and value independently. Do not fall back to label when value is empty.
+                    val = entry.get('value') if 'value' in entry else ''
+                    items.append({'label': entry.get('label'), 'value': val})
         return jsonify({'items': items})
     except Exception as e:
         return jsonify({'items': [], 'error': str(e)}), 500
@@ -788,7 +1124,9 @@ def nextc_options():
         elif isinstance(j, list):
             for entry in j:
                 if isinstance(entry, dict) and 'label' in entry:
-                    items.append({'label': entry.get('label'), 'value': entry.get('value', '')})
+                    # Preserve label and value independently. Do not fall back to label when value is empty.
+                    val = entry.get('value') if 'value' in entry else ''
+                    items.append({'label': entry.get('label'), 'value': val})
         return jsonify({'items': items})
     except Exception as e:
         return jsonify({'items': [], 'error': str(e)}), 500
@@ -1027,7 +1365,9 @@ def meeting_options():
         elif isinstance(j, list):
             for entry in j:
                 if isinstance(entry, dict) and 'label' in entry:
-                    items.append({'label': entry.get('label'), 'value': entry.get('value', '')})
+                    # Preserve label and value independently. Do not fall back to label when value is empty.
+                    val = entry.get('value') if 'value' in entry else ''
+                    items.append({'label': entry.get('label'), 'value': val})
         return jsonify({'items': items})
     except Exception as e:
         return jsonify({'items': [], 'error': str(e)}), 500

@@ -5,7 +5,10 @@
     <meta name="viewport" content="width=device-width,initial-scale=1" />
     <title>Mail Create</title>
     <style>
-      body{margin:12px;font-family:Segoe UI, Meiryo, Arial}
+      /* Use Yu Gothic (游ゴシック) where available and set base font size to 10pt */
+      body{margin:12px;font-family:"Yu Gothic UI", "Yu Gothic", "游ゴシック体", "游ゴシック", Meiryo, "Segoe UI", Arial, sans-serif; font-size:10pt}
+      /* Ensure form controls and buttons explicitly inherit the same font and size */
+      input, input[type=text], textarea, select, button { font-family: inherit; font-size: inherit; }
       #page{display:flex;gap:16px}
       #left{width:600px}
       #right{flex:1;border-left:3px solid #2f7f4f;padding-left:12px;min-height:720px}
@@ -96,8 +99,8 @@
       </div>
       <div id="right">
         <div style="display:flex;align-items:center;justify-content:flex-end;margin-bottom:6px;gap:8px">
-          <button type="button" id="refreshPreviewBtn" style="padding:4px 8px;font-size:12px">Refresh</button>
-          <button type="button" id="reloadPageBtn" title="Reload page" style="padding:4px 8px;font-size:12px">Reload</button>
+          <button type="button" id="refreshPreviewBtn" style="padding:4px 8px">Refresh</button>
+          <button type="button" id="reloadPageBtn" title="Reload page" style="padding:4px 8px">Reload</button>
         </div>
         <div id="largePanel" style="width:100%;height:100%;background:#fff;border:1px solid #ccc;padding:12px;box-sizing:border-box;white-space:pre-wrap"></div>
       </div>
