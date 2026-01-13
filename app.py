@@ -165,6 +165,42 @@ def _blob_get_text_for_user(user_token: str, blob_name: str):
         return None
 
 
+def _blob_list_templates():
+    """List template filenames in the shared template_files/ prefix of the configured container."""
+    svc = get_blob_service_client()
+    if not svc:
+        return []
+    container = svc.get_container_client(_get_shared_container())
+    prefix = 'template_files/'
+    try:
+        blobs = container.list_blobs(name_starts_with=prefix)
+    except Exception:
+        return []
+    items = []
+    for b in blobs:
+        name = b.name[len(prefix):] if b.name.startswith(prefix) else b.name
+        if not name:
+            continue
+        if name.lower().endswith('.json'):
+            items.append(name)
+    return items
+
+
+def _blob_get_text(blob_name: str):
+    """Get the text content of the blob stored under template_files/{blob_name}."""
+    svc = get_blob_service_client()
+    if not svc:
+        return None
+    container = svc.get_container_client(_get_shared_container())
+    blob_client = container.get_blob_client(f'template_files/{blob_name}')
+    try:
+        stream = blob_client.download_blob()
+        data = stream.readall()
+        return data.decode('utf-8')
+    except Exception:
+        return None
+
+
 def _blob_delete_for_user(user_token: str, blob_name: str):
     try:
         svc = get_blob_service_client()
@@ -489,7 +525,7 @@ def create_mail():
     subject = data.get('title') or data.get('emailType') or ''
 
     # Only attempt Outlook automation on Windows and when not disabled by env
-    if DISABLE_WINDOWS_AUTOMATION.lower() in ('1', 'true', 'yes') or platform.system() != 'Windows':
+    if str(DISABLE_WINDOWS_AUTOMATION).lower() in ('1', 'true', 'yes') or platform.system() != 'Windows':
         return jsonify({'status': 'error', 'message': 'Outlook automation is disabled or only supported on Windows.'}), 400
 
     try:
@@ -546,7 +582,7 @@ def create_schedule():
         return jsonify({'status': 'error', 'message': 'start_iso and end_iso are required'}), 400
 
     # Only attempt Outlook automation on Windows and when not disabled by env
-    if DISABLE_WINDOWS_AUTOMATION.lower() in ('1', 'true', 'yes') or platform.system() != 'Windows':
+    if str(DISABLE_WINDOWS_AUTOMATION).lower() in ('1', 'true', 'yes') or platform.system() != 'Windows':
         return jsonify({'status': 'error', 'message': 'Outlook scheduling is disabled or only supported on Windows.'}), 400
 
     try:
@@ -1151,9 +1187,9 @@ def get_template_for(email_type: str):
                             return jsonify({'status': 'ok', 'template': obj[kv], 'source_file': b, 'key': kv})
 
             # fallback to shared container (no user prefix)
-            blobs = _blob_list_templates(shared_container)
+            blobs = _blob_list_templates()
             for b in blobs:
-                txt = _blob_get_text(shared_container, b)
+                txt = _blob_get_text(b)
                 if not txt:
                     continue
                 try:
@@ -1310,7 +1346,7 @@ def get_footer():
                     return jsonify({'status': 'ok', 'footer': footer or '', 'additional_footer': additional or '', 'fcs_footer': fcs or ''})
             # try shared container fallback
             shared_container = _get_shared_container()
-            txt = _blob_get_text(shared_container, 'footer.json')
+            txt = _blob_get_text('footer.json')
             if txt:
                 try:
                     obj = json.loads(txt)
