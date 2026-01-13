@@ -186,7 +186,10 @@ def preview():
     return jsonify({'preview': preview_text})
 
 
-DISABLE_WINDOWS_AUTOMATION = os.environ.get('DISABLE_WINDOWS_AUTOMATION', '1' if os.environ.get('WERKZEUG_RUN_MAIN') else '0')
+DISABLE_WINDOWS_AUTOMATION = os.environ.get('DISABLE_WINDOWS_AUTOMATION')
+if DISABLE_WINDOWS_AUTOMATION is None:
+    # Default to enabled automation on Windows, disabled elsewhere
+    DISABLE_WINDOWS_AUTOMATION = '0' if platform.system() == 'Windows' else '1'
 
 
 @app.route('/create_mail', methods=['POST'])

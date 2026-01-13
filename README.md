@@ -58,3 +58,7 @@ Notes:
 - Use the provided `Procfile` which runs `gunicorn`.
 
 Note for CI: Windows-only dependencies are split into `requirements-windows.txt`. CI runners on Linux should install only `requirements.txt` to avoid installing `pywin32`.
+
+Windows Outlook automation:
+- By default the app will enable Outlook automation when running on Windows. To explicitly disable automation set `DISABLE_WINDOWS_AUTOMATION=true` as an environment variable.
+	To enable explicitly (if previously disabled): `setx DISABLE_WINDOWS_AUTOMATION 0` and restart your shell.
