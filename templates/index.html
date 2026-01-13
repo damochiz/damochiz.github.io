@@ -25,6 +25,10 @@
       textarea{resize:vertical}
       .row{margin-bottom:10px}
       button{padding:8px 12px}
+      /* SR info container to allow overlaying warning over info */
+      .sr-container{display:inline-block;vertical-align:middle;margin-left:8px}
+      .sr-container .sr-info{color:#666;display:inline-block;max-width:220px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+      .sr-container .sr-warning{color:crimson;display:none;font-weight:600;max-width:220px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
       /* Modal for template editing */
       .modal{position:fixed;inset:0;display:none;align-items:center;justify-content:center;background:rgba(0,0,0,0.45);z-index:2000}
       .modal-content{background:#fff;padding:16px;border-radius:6px;max-width:900px;width:90%;max-height:90%;overflow:auto;box-sizing:border-box}
@@ -35,18 +39,26 @@
     <h1>Mail Create</h1>
     <div id="page">
       <div id="left">
-        <div class="row"><span class="label"></span><button id="srImportBtn">SR Import</button> <button id="changeTemplateDirBtn" class="btn-small" title="テンプレート保存先を変更">Template Dir</button></div>
+        <div class="row"><span class="label"></span>
+          <button id="refreshSrBtn" style="margin-right:8px;padding:6px 10px">Refresh SR</button>
+          <button id="srImportBtn">SR Import</button>
+          <button id="changeTemplateDirBtn" class="btn-small" title="テンプレート保存先を変更">Template Dir</button>
+        </div>
         <div style="height:8px"></div>
         <div class="row"><span class="label">SR 番号:</span>
-          <input list="srList" id="srNumberInput" style="width:380px" placeholder="SR番号を入力または選択" />
-          <button type="button" id="dfmBtn" class="btn-small" style="margin-left:16px;padding:8px 4px;width:30px">DfM</button>
+          <input list="srList" id="srNumberInput" style="width:460px;margin-right:18px" placeholder="SR番号を入力または選択" />
+          <span class="sr-container" style="margin-left:0">
+            <span id="srInfo" class="sr-info"></span>
+            <span id="srWarning" class="sr-warning">未登録の SR 番号です</span>
+          </span>
+          <button type="button" id="dfmBtn" class="btn-small" style="margin-left:6px;padding:8px 4px;width:30px">DfM</button>
           <button type="button" id="ascBtn" class="btn-small" style="margin-left:8px;padding:8px 4px;width:30px">ASC</button>
-          <span id="srWarning" style="color:crimson;margin-left:8px;display:none;font-weight:600"></span>
           <datalist id="srList"></datalist>
         </div>
         <div class="row customer"><span class="label">お客様名:</span>
           <input type="text" id="customerName" style="width:520px"/>
-          <button class="button is-small" id="replaceNameBtn" style="margin-left:12px">Replace</button>
+          <span id="contactInfo" style="margin-left:19px;color:#444;max-width:140px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis"></span>
+          <button class="button is-small" id="replaceNameBtn" style="margin-left:13px">Replace</button>
           <button class="button is-small" id="resetNameBtn" style="margin-left:8px">Reset</button>
           <span id="replaceFeedback" style="margin-left:8px;color:green;display:none;">Saved</span>
         </div>

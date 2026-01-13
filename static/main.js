@@ -601,14 +601,27 @@ async function loadSrList(){
     if (!j || !j.items) return;
     // clear existing datalist options
     while(datalist.firstChild) datalist.removeChild(datalist.firstChild);
-      // Replace/Reset handlers are attached once at top-level to avoid duplicate listeners
+    // Sort items by internal_title ascending (empty titles go last)
+    const items = Array.isArray(j.items) ? j.items.slice().sort((a,b)=>{
+      const aTitle = (a && a.internal_title) ? String(a.internal_title).toLowerCase() : null;
+      const bTitle = (b && b.internal_title) ? String(b.internal_title).toLowerCase() : null;
+      if (aTitle === bTitle) return 0;
+      if (aTitle === null) return 1;
+      if (bTitle === null) return -1;
+      return aTitle < bTitle ? -1 : 1;
+    }) : [];
+    // Replace/Reset handlers are attached once at top-level to avoid duplicate listeners
     // mapping from case_number -> meta
     window.__srMap = {};
-    for (const it of j.items){
+    // debug: show first 10 sorted titles
+    try{ console.debug('SR sorted preview ->', items.slice(0,10).map(x=>({case_number:x.case_number, internal_title:x.internal_title}))); }catch(e){}
+    for (const it of items){
       const v = it.case_number || '';
       if (!v) continue;
       const opt = document.createElement('option');
+      // Show internal_title in the option label if available so the dropdown shows extra context
       opt.value = v;
+      if (it.internal_title) opt.label = `${v} - ${it.internal_title}`;
       datalist.appendChild(opt);
       window.__srMap[v] = {contact: it.contact || '', customer_title: it.customer_title || '', internal_title: it.internal_title || '', replace_name: it.replace_name || '', sympton: it.sympton || ''};
     }
@@ -620,12 +633,14 @@ async function loadSrList(){
       const titleEl = document.getElementById('title');
       const contentEl = document.getElementById('content');
 
-      // If input is empty: clear customer and title and hide warning
+      // If input is empty: clear customer and title and hide warning/info
       if (!val){
         try{ if (customerEl) customerEl.value = ''; }catch(e){}
         try{ if (titleEl) titleEl.value = ''; }catch(e){}
         try{ if (contentEl) contentEl.value = ''; }catch(e){}
-        if (warningEl) { warningEl.style.display = 'none'; warningEl.textContent = ''; }
+        if (warningEl) { warningEl.style.display = 'none'; }
+        try{ const infoEl = document.getElementById('srInfo'); if (infoEl) { infoEl.textContent = ''; infoEl.style.display = 'inline-block'; } }catch(e){}
+        try{ const contactEl = document.getElementById('contactInfo'); if (contactEl) contactEl.textContent = ''; }catch(e){}
         // refresh preview to reflect cleared fields
         try{ const emailSelect = document.getElementById('emailType'); if (emailSelect && emailSelect.value) emailSelect.dispatchEvent(new Event('change')); else { const panel = document.getElementById('largePanel'); if (panel){ (async ()=>{ const tpl = panel.textContent || ''; const server = await renderWithServer(tpl); if (server){ panel.textContent = sanitizeBlankLines(applySyncPlaceholders(server)); } else { panel.textContent = sanitizeBlankLines(applyTemplatePlaceholders(tpl)); } })(); } } }catch(e){ console.error('refresh on sr clear failed', e); }
         return;
@@ -634,7 +649,9 @@ async function loadSrList(){
       const meta = window.__srMap[val];
       // If SR not in the datalist / map: show warning and do not overwrite customer/title (to preserve user edits)
       if (!meta){
-        if (warningEl){ warningEl.textContent = '未登録の SR 番号です'; warningEl.style.display = 'inline'; }
+        // show warning in the info area by hiding info and showing the warning element
+        if (warningEl){ warningEl.textContent = '未登録の SR 番号です'; warningEl.style.display = 'inline-block'; }
+        try{ const infoEl = document.getElementById('srInfo'); if (infoEl) { infoEl.textContent = ''; infoEl.style.display = 'none'; } }catch(e){}
         // still clear content area since it's SR-specific
         try{ if (contentEl) contentEl.value = ''; }catch(e){}
         // refresh preview to show cleared content
@@ -642,14 +659,19 @@ async function loadSrList(){
         return;
       }
 
-      // Valid SR: hide warning and populate fields
-      if (warningEl) { warningEl.style.display = 'none'; warningEl.textContent = ''; }
+      // Valid SR: hide warning, populate fields and update srInfo
+      if (warningEl) { warningEl.style.display = 'none'; }
       try{
+        // Prefer replace_name when available; otherwise fall back to contact.
         if (meta.replace_name) customerEl.value = meta.replace_name;
         else if (meta.contact) customerEl.value = meta.contact;
+        // Title still comes from customer_title
         if (meta.customer_title) titleEl.value = meta.customer_title;
         if (contentEl) contentEl.value = (meta.sympton || '');
       }catch(e){ /* ignore DOM errors */ }
+      try{ const infoEl = document.getElementById('srInfo'); if (infoEl) { infoEl.textContent = (meta.internal_title || ''); infoEl.style.display = 'inline-block'; } }catch(e){}
+      // update contactInfo display (next to Replace button)
+      try{ const contactEl = document.getElementById('contactInfo'); if (contactEl) { contactEl.textContent = (meta.contact || ''); } }catch(e){}
 
       // Refresh preview on SR change so right panel reflects updated fields
       try{
@@ -673,6 +695,28 @@ async function loadSrList(){
   }catch(e){ console.error('loadSrList failed', e); }
 }
 loadSrList();
+
+// Refresh SR button clears SR and related fields
+(function(){
+  const refreshSrBtn = document.getElementById('refreshSrBtn');
+  if (!refreshSrBtn) return;
+  refreshSrBtn.addEventListener('click', function(){
+    try{
+      const srEl = document.getElementById('srNumberInput');
+      if (srEl) srEl.value = '';
+      const customerEl = document.getElementById('customerName'); if (customerEl) customerEl.value = '';
+      const titleEl = document.getElementById('title'); if (titleEl) titleEl.value = '';
+      const contentEl = document.getElementById('content'); if (contentEl) contentEl.value = '';
+      const contactEl = document.getElementById('contactInfo'); if (contactEl) contactEl.textContent = '';
+      const srInfo = document.getElementById('srInfo'); if (srInfo) srInfo.textContent = '';
+      const srWarning = document.getElementById('srWarning'); if (srWarning) srWarning.style.display = 'none';
+      // trigger preview refresh
+      const emailSelect = document.getElementById('emailType');
+      if (emailSelect && emailSelect.value) emailSelect.dispatchEvent(new Event('change'));
+      else { const panel = document.getElementById('largePanel'); if (panel) panel.textContent = ''; }
+    }catch(e){ console.error('refreshSrBtn click failed', e); }
+  });
+})();
 
 // Replace/Reset handlers are defined further down; no top-level attach here.
 
@@ -1773,7 +1817,9 @@ if (resetNameBtn){
       if (res && res.status === 'ok'){
         if (window.__srMap && window.__srMap[caseNo]) delete window.__srMap[caseNo].replace_name;
         const item = window.__srMap && window.__srMap[caseNo];
-        document.getElementById('customerName').value = (item && (item.replace_name || item.contact)) || '';
+        // Prefer contact for display after reset
+        document.getElementById('customerName').value = (item && (item.contact || item.replace_name)) || '';
+        try{ const contactEl = document.getElementById('contactInfo'); if (contactEl) contactEl.textContent = (item && item.contact) || ''; }catch(e){}
         if (feedback) { feedback.style.display = 'inline'; setTimeout(()=> feedback.style.display='none', 1200); }
       } else {
         alert('Error: ' + (res && res.message ? res.message : 'failed'));
