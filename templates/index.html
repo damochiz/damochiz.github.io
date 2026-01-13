@@ -44,7 +44,7 @@
           <button id="srImportBtn">SR Import</button>
           <button id="changeTemplateDirBtn" class="btn-small" title="テンプレート保存先を変更">Template Dir</button>
           <button id="loadFromPcBtn" class="btn-small" title="ローカルPCからテンプレートを読み込む" style="margin-left:6px">Load PC</button>
-          <input type="file" id="loadTemplatesInput" accept=".json,application/json" multiple style="display:none" />
+          <input type="file" id="loadTemplatesInput" accept=".json,application/json,application/zip" multiple style="display:none" />
         </div>
         <div style="height:8px"></div>
         <div class="row"><span class="label">SR 番号:</span>
@@ -131,6 +131,15 @@
         <input type="text" id="templateDirInput" style="width:100%" placeholder="C:\\Users\\you\\OneDrive\\CreateMailTool\\template_files" />
         <div style="margin-top:8px;margin-bottom:8px">
           <button id="pickConfigBtn">Explorer から選択</button>
+        </div>
+        <div style="margin-top:8px">
+          <label class="label" style="display:block;margin-bottom:6px">テンプレート保存モード:</label>
+          <label><input type="radio" name="storageMode" value="local" checked> ローカル</label>
+          <label style="margin-left:12px"><input type="radio" name="storageMode" value="blob"> Blob ストレージ</label>
+        </div>
+        <div id="storageConfigFields" style="margin-top:8px;display:none">
+          <div style="margin-bottom:6px">Storage Account: <input type="text" id="storageAccountInput" placeholder="mystorageaccount" style="width:320px" /></div>
+          <div>Container: <input type="text" id="storageContainerInput" placeholder="mail-templates" style="width:200px" /></div>
         </div>
         <div style="text-align:right;margin-top:8px">
           <button id="saveConfigBtn">Save</button>

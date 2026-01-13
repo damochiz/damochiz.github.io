@@ -2,3 +2,6 @@ Flask==2.3.2
 
 # Use a WSGI server for production on Linux (choose a broadly available version)
 gunicorn>=20.1.0,<21
+
+azure-identity>=1.12.0
+azure-storage-blob>=12.20.0

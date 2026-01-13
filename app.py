@@ -12,6 +12,8 @@ import hashlib
 import subprocess
 import zipfile
 import io
+import base64
+from functools import lru_cache
 
 
 def dbg(msg):
@@ -28,6 +30,189 @@ def dbg(msg):
 
 app = Flask(__name__)
 
+# Blob storage feature toggle: set AZURE_BLOB_TEMPLATES=1 and AZURE_STORAGE_ACCOUNT to enable
+AZURE_BLOB_TEMPLATES = os.environ.get('AZURE_BLOB_TEMPLATES', '0') == '1'
+AZURE_STORAGE_ACCOUNT = os.environ.get('AZURE_STORAGE_ACCOUNT')
+# Single container name (default mail-templates)
+MAIL_TEMPLATES_CONTAINER = os.environ.get('MAIL_TEMPLATES_CONTAINER', 'mail-templates')
+
+
+
+def _import_blob_clients():
+    try:
+        from azure.identity import DefaultAzureCredential
+        from azure.storage.blob import BlobServiceClient
+        return DefaultAzureCredential, BlobServiceClient
+    except Exception:
+        return None, None
+
+
+def _sanitize_token(uid: str) -> str:
+    # produce a filesystem/blob-safe token from user id
+    if not uid:
+        return 'anonymous'
+    s = uid.lower()
+    import re
+    s = re.sub(r'[^a-z0-9-._]', '-', s)
+    s = re.sub(r'-+', '-', s).strip('-')
+    if len(s) < 1:
+        s = 'u'
+    # trim to reasonable length
+    if len(s) > 64:
+        s = s[:64]
+    return s
+
+
+@lru_cache(maxsize=32)
+def get_blob_service_client():
+    if not blob_mode_enabled():
+        return None
+    DefaultAzureCredential, BlobServiceClient = _import_blob_clients()
+    if not DefaultAzureCredential or not BlobServiceClient:
+        raise RuntimeError('Azure Blob client libraries are required when AZURE_BLOB_TEMPLATES=1')
+    # allow runtime override of storage account via config.json
+    cfg = get_storage_config()
+    account = cfg.get('storage_account') or AZURE_STORAGE_ACCOUNT
+    if not account:
+        raise RuntimeError('AZURE_STORAGE_ACCOUNT not configured for blob access')
+    account_url = f"https://{account}.blob.core.windows.net"
+    cred = DefaultAzureCredential()
+    return BlobServiceClient(account_url=account_url, credential=cred)
+
+
+def _get_request_user_id():
+    # derive a user-identifying string from request context (prefer headers set by Easy Auth or proxy)
+    try:
+        from flask import has_request_context, request
+        if not has_request_context():
+            return None
+        uid = None
+        # common headers
+        uid = request.headers.get('X-MS-CLIENT-PRINCIPAL-NAME') or request.headers.get('X-MS-CLIENT-PRINCIPAL-ID')
+        if not uid:
+            uid = request.headers.get('X-Remote-User') or request.headers.get('X-Forwarded-User') or request.headers.get('X-Username')
+        try:
+            auth = getattr(request, 'authorization', None)
+            if not uid and auth and getattr(auth, 'username', None):
+                uid = auth.username
+        except Exception:
+            pass
+        try:
+            if not uid:
+                uid = request.cookies.get('username')
+        except Exception:
+            pass
+        if isinstance(uid, str) and uid:
+            return uid
+    except Exception:
+        pass
+    return None
+
+
+def _get_shared_container():
+    # single shared container for all templates; prefer runtime config if set
+    try:
+        cfg = get_storage_config()
+        cont = cfg.get('container')
+        if cont:
+            return cont
+    except Exception:
+        pass
+    return MAIL_TEMPLATES_CONTAINER
+
+
+def blob_mode_enabled():
+    # Determine blob mode solely from runtime UI config (do not depend on env)
+    try:
+        cfg = get_storage_config()
+        return (cfg.get('mode') == 'blob')
+    except Exception:
+        return False
+
+
+def _blob_list_templates_for_user(user_token: str):
+    svc = get_blob_service_client()
+    if not svc:
+        return []
+    container = svc.get_container_client(_get_shared_container())
+    prefix = f'template_files/{user_token}/'
+    try:
+        blobs = container.list_blobs(name_starts_with=prefix)
+    except Exception:
+        return []
+    items = []
+    for b in blobs:
+        # strip prefix
+        name = b.name[len(prefix):] if b.name.startswith(prefix) else b.name
+        if not name:
+            continue
+        if name.lower().endswith('.json'):
+            items.append(name)
+    return items
+
+
+def _blob_get_text_for_user(user_token: str, blob_name: str):
+    svc = get_blob_service_client()
+    if not svc:
+        return None
+    container = svc.get_container_client(_get_shared_container())
+    blob_client = container.get_blob_client(f'template_files/{user_token}/{blob_name}')
+    try:
+        stream = blob_client.download_blob()
+        data = stream.readall()
+        return data.decode('utf-8')
+    except Exception:
+        return None
+
+
+def _blob_delete_for_user(user_token: str, blob_name: str):
+    try:
+        svc = get_blob_service_client()
+        if not svc:
+            return False
+        container = svc.get_container_client(_get_shared_container())
+        blob_client = container.get_blob_client(f'template_files/{user_token}/{blob_name}')
+        try:
+            blob_client.delete_blob()
+            return True
+        except Exception:
+            return False
+    except Exception:
+        return False
+
+
+def _blob_upload_text_for_user(user_token: str, blob_name: str, text: str):
+    try:
+        dbg(f'blob upload: user_token={user_token} blob_name={blob_name}')
+        svc = get_blob_service_client()
+        dbg(f'blob upload: svc={None if svc is None else type(svc).__name__}')
+        if not svc:
+            raise RuntimeError('blob service not available')
+        container_name = _get_shared_container()
+        dbg(f'blob upload: container={container_name}')
+        container = svc.get_container_client(container_name)
+        # create container if not exists (idempotent)
+        try:
+            container.create_container()
+        except Exception:
+            pass
+        blob_client = container.get_blob_client(f'template_files/{user_token}/{blob_name}')
+        blob_client.upload_blob(text.encode('utf-8'), overwrite=True)
+        dbg(f'blob upload: success user_token={user_token} blob_name={blob_name}')
+        return True
+    except Exception as e:
+        try:
+            tb = traceback.format_exc()
+            dbg(f'blob upload failed: {e}')
+            dbg(tb)
+        except Exception:
+            try:
+                dbg(f'blob upload failed (no traceback): {e}')
+            except Exception:
+                pass
+        return False
+
+
 # Short-lived in-memory cache to deduplicate near-duplicate schedule requests.
 # Keys are SHA256(title+body+start+end) -> timestamp (time.time()).
 recent_schedules = {}
@@ -35,6 +220,49 @@ recent_schedules_lock = threading.Lock()
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, 'config.json')
+
+
+def get_storage_config():
+    # Returns a dict with keys: mode ('local'|'blob'), storage_account, container
+    cfg = {}
+    try:
+        if os.path.exists(CONFIG_PATH):
+            with open(CONFIG_PATH, 'r', encoding='utf-8') as f:
+                cfg = json.load(f) or {}
+    except Exception:
+        cfg = {}
+    out = {
+        'mode': cfg.get('storage_mode', 'local'),
+        'storage_account': cfg.get('storage_account') or os.environ.get('AZURE_STORAGE_ACCOUNT'),
+        'container': cfg.get('mail_templates_container') or os.environ.get('MAIL_TEMPLATES_CONTAINER', 'mail-templates')
+    }
+    return out
+
+
+def save_storage_config(mode: str, storage_account: str | None, container: str | None):
+    try:
+        try:
+            cfg = {}
+            if os.path.exists(CONFIG_PATH):
+                with open(CONFIG_PATH, 'r', encoding='utf-8') as f:
+                    cfg = json.load(f) or {}
+        except Exception:
+            cfg = {}
+        cfg['storage_mode'] = mode if mode in ('local', 'blob') else 'local'
+        if storage_account:
+            cfg['storage_account'] = storage_account
+        else:
+            cfg.pop('storage_account', None)
+        if container:
+            cfg['mail_templates_container'] = container
+        else:
+            cfg.pop('mail_templates_container', None)
+        with open(CONFIG_PATH, 'w', encoding='utf-8') as f:
+            json.dump(cfg, f, ensure_ascii=False, indent=2)
+        return True
+    except Exception:
+        return False
+
 
 def get_template_dir():
     # Priority: env var -> config.json -> default workspace/template_files
@@ -639,33 +867,59 @@ def create_schedule():
 
 @app.route('/templates', methods=['GET'])
 def get_templates():
-    # Return all templates by reading per-type files
+    # Return all templates: prefer local filesystem (Template Dir). If nothing found locally, fall back to Blob per-user.
     data = {}
-    # read per-type files
     try:
         ensure_templates_dir()
         for fn in os.listdir(get_template_dir()):
-            # skip non-json files
             if not fn.lower().endswith('.json'):
                 continue
             path = os.path.join(get_template_dir(), fn)
             try:
                 with open(path, 'r', encoding='utf-8-sig') as f:
                     obj = json.load(f)
-                    # if file contains {"template": "..."} treat as single template
                     if isinstance(obj, dict) and 'template' in obj:
                         key = os.path.splitext(fn)[0]
                         data[key] = obj.get('template')
-                    # if file contains a mapping of multiple named templates, merge them
                     elif isinstance(obj, dict):
                         for k, v in obj.items():
-                            # only include string templates
                             if isinstance(v, str):
                                 data[k] = v
             except Exception:
                 continue
     except Exception:
         pass
+
+    # If local templates were found, return them
+    if data:
+        return jsonify({'status': 'ok', 'templates': data})
+
+    # Otherwise, if blob mode enabled, attempt to read per-user blobs
+    if blob_mode_enabled():
+        try:
+            uid = _get_request_user_id() or 'anonymous'
+            user_token = _sanitize_token(uid)
+            blobs = _blob_list_templates_for_user(user_token)
+            for bname in blobs:
+                txt = _blob_get_text_for_user(user_token, bname)
+                if not txt:
+                    continue
+                try:
+                    obj = json.loads(txt)
+                except Exception:
+                    # treat raw string as single template
+                    data[os.path.splitext(bname)[0]] = txt
+                    continue
+                if isinstance(obj, dict) and 'template' in obj:
+                    data[os.path.splitext(bname)[0]] = obj.get('template')
+                elif isinstance(obj, dict):
+                    for k, v in obj.items():
+                        if isinstance(v, str):
+                            data[k] = v
+            return jsonify({'status': 'ok', 'templates': data})
+        except Exception as e:
+            return jsonify({'status': 'error', 'message': str(e)}), 500
+
     return jsonify({'status': 'ok', 'templates': data})
 
 
@@ -673,11 +927,14 @@ def get_templates():
 def get_template_keys():
     # Return mapping of filename -> list of keys inside that file (for multi-key files like fcs.json)
     result = {}
+    # Prefer local filesystem; if no local files exist, fall back to blob storage
     try:
         ensure_templates_dir()
+        local_found = False
         for fn in os.listdir(get_template_dir()):
             if not fn.lower().endswith('.json'):
                 continue
+            local_found = True
             path = os.path.join(get_template_dir(), fn)
             try:
                 with open(path, 'r', encoding='utf-8-sig') as f:
@@ -687,6 +944,30 @@ def get_template_keys():
                         result[fn] = keys
             except Exception:
                 continue
+        if local_found:
+            return jsonify({'status': 'ok', 'files': result})
+    except Exception:
+        pass
+
+    try:
+        # filesystem had no files or failed; try blob
+        if blob_mode_enabled():
+            uid = _get_request_user_id() or 'anonymous'
+            user_token = _sanitize_token(uid)
+            blobs = _blob_list_templates_for_user(user_token)
+            for b in blobs:
+                txt = _blob_get_text_for_user(user_token, b)
+                if not txt:
+                    continue
+                try:
+                    obj = json.loads(txt)
+                except Exception:
+                    result[b] = ['template']
+                    continue
+                if isinstance(obj, dict):
+                    result[b] = list(obj.keys())
+            return jsonify({'status': 'ok', 'files': result})
+        
     except Exception:
         pass
     return jsonify({'status': 'ok', 'files': result})
@@ -699,7 +980,25 @@ def save_templates():
     templates = payload.get('templates')
     if not isinstance(templates, dict):
         return jsonify({'status': 'error', 'message': 'templates must be an object/dict'}), 400
-    # Save per-type files only
+    # Save per-type files only (filesystem or blob)
+    if blob_mode_enabled():
+        try:
+            uid = _get_request_user_id() or 'anonymous'
+            user_token = _sanitize_token(uid)
+            ok = True
+            for k, v in templates.items():
+                fname = safe_type_filename(k) + '.json'
+                # store as {'template': v}
+                payload_txt = json.dumps({'template': v}, ensure_ascii=False)
+                if not _blob_upload_text_for_user(user_token, fname, payload_txt):
+                    ok = False
+            if ok:
+                return jsonify({'status': 'ok'})
+            return jsonify({'status': 'error', 'message': 'failed to upload some templates'}), 500
+        except Exception as e:
+            return jsonify({'status': 'error', 'message': str(e)}), 500
+
+    # filesystem fallback
     success = True
     for k, v in templates.items():
         try:
@@ -726,68 +1025,151 @@ def get_template_for(email_type: str):
     except Exception:
         source_file = None
 
-    # Try per-type file first (or the explicitly requested source_file)
-    if source_file:
-        path = os.path.join(get_template_dir(), source_file)
-    else:
-        path = template_file_path_for(email_type)
+    # First: try filesystem (Template Dir)
     try:
-        if os.path.exists(path):
-            with open(path, 'r', encoding='utf-8-sig') as f:
-                obj = json.load(f)
-                # If this file is a single-template file
-                if isinstance(obj, dict) and 'template' in obj:
-                    return jsonify({'status': 'ok', 'template': obj.get('template'), 'source_file': os.path.basename(path), 'key': email_type})
-                # If a source_file was explicitly requested and it contains the desired key (multi-key mapping), prefer it
-                if source_file and isinstance(obj, dict) and email_type in obj and isinstance(obj[email_type], str):
-                    return jsonify({'status': 'ok', 'template': obj[email_type], 'source_file': os.path.basename(path), 'key': email_type})
-    except Exception:
-        pass
-    # Next: try to find the template inside any per-file mapping (e.g. fcs.json contains multiple named templates)
-    try:
-        ensure_templates_dir()
-        # Prefer group file that matches safe filename for this email_type (e.g., 'FCS' -> 'fcs.json')
-        expected_group = safe_type_filename(email_type) + '.json'
-        expected_path = os.path.join(get_template_dir(), expected_group)
-        if os.path.exists(expected_path):
-            try:
-                with open(expected_path, 'r', encoding='utf-8-sig') as f:
-                    obj = json.load(f)
-                    if isinstance(obj, dict):
-                        # direct key match in expected group
-                        if email_type in obj and isinstance(obj[email_type], str):
-                            return jsonify({'status': 'ok', 'template': obj[email_type], 'source_file': expected_group, 'key': email_type})
-                        # try common canonical variants
-                        key_variants = [email_type, email_type.strip(), email_type.strip().upper(), email_type.strip().title()]
-                        for kv in key_variants:
-                            if kv in obj and isinstance(obj[kv], str):
-                                return jsonify({'status': 'ok', 'template': obj[kv], 'source_file': expected_group, 'key': kv})
-            except Exception:
-                pass
-        for fn in os.listdir(get_template_dir()):
-            if not fn.lower().endswith('.json'):
-                continue
-            path = os.path.join(get_template_dir(), fn)
-            try:
+        # Try per-type file first (or the explicitly requested source_file)
+        if source_file:
+            path = os.path.join(get_template_dir(), source_file)
+        else:
+            path = template_file_path_for(email_type)
+        try:
+            if os.path.exists(path):
                 with open(path, 'r', encoding='utf-8-sig') as f:
                     obj = json.load(f)
-                    if isinstance(obj, dict):
-                        # If a source_file was requested, prefer it
-                        if source_file and fn == source_file:
+                    # If this file is a single-template file
+                    if isinstance(obj, dict) and 'template' in obj:
+                        return jsonify({'status': 'ok', 'template': obj.get('template'), 'source_file': os.path.basename(path), 'key': email_type})
+                    # If a source_file was explicitly requested and it contains the desired key (multi-key mapping), prefer it
+                    if source_file and isinstance(obj, dict) and email_type in obj and isinstance(obj[email_type], str):
+                        return jsonify({'status': 'ok', 'template': obj[email_type], 'source_file': os.path.basename(path), 'key': email_type})
+        except Exception:
+            pass
+
+        # Next: try to find the template inside any per-file mapping (e.g. fcs.json contains multiple named templates)
+        try:
+            ensure_templates_dir()
+            # Prefer group file that matches safe filename for this email_type (e.g., 'FCS' -> 'fcs.json')
+            expected_group = safe_type_filename(email_type) + '.json'
+            expected_path = os.path.join(get_template_dir(), expected_group)
+            if os.path.exists(expected_path):
+                try:
+                    with open(expected_path, 'r', encoding='utf-8-sig') as f:
+                        obj = json.load(f)
+                        if isinstance(obj, dict):
+                            # direct key match in expected group
+                            if email_type in obj and isinstance(obj[email_type], str):
+                                return jsonify({'status': 'ok', 'template': obj[email_type], 'source_file': expected_group, 'key': email_type})
+                            # try common canonical variants
+                            key_variants = [email_type, email_type.strip(), email_type.strip().upper(), email_type.strip().title()]
+                            for kv in key_variants:
+                                if kv in obj and isinstance(obj[kv], str):
+                                    return jsonify({'status': 'ok', 'template': obj[kv], 'source_file': expected_group, 'key': kv})
+                except Exception:
+                    pass
+            for fn in os.listdir(get_template_dir()):
+                if not fn.lower().endswith('.json'):
+                    continue
+                path = os.path.join(get_template_dir(), fn)
+                try:
+                    with open(path, 'r', encoding='utf-8-sig') as f:
+                        obj = json.load(f)
+                        if isinstance(obj, dict):
+                            # If a source_file was requested, prefer it
+                            if source_file and fn == source_file:
+                                if email_type in obj and isinstance(obj[email_type], str):
+                                    return jsonify({'status': 'ok', 'template': obj[email_type], 'source_file': fn, 'key': email_type})
+                            # direct key match (case-sensitive as stored)
                             if email_type in obj and isinstance(obj[email_type], str):
                                 return jsonify({'status': 'ok', 'template': obj[email_type], 'source_file': fn, 'key': email_type})
-                        # direct key match (case-sensitive as stored)
-                        if email_type in obj and isinstance(obj[email_type], str):
-                            return jsonify({'status': 'ok', 'template': obj[email_type], 'source_file': fn, 'key': email_type})
-                        # try common canonical keys for variants
-                        key_variants = [email_type, email_type.strip(), email_type.strip().upper(), email_type.strip().title()]
-                        for kv in key_variants:
-                            if kv in obj and isinstance(obj[kv], str):
-                                return jsonify({'status': 'ok', 'template': obj[kv], 'source_file': fn, 'key': kv})
-            except Exception:
-                continue
+                            # try common canonical keys for variants
+                            key_variants = [email_type, email_type.strip(), email_type.strip().upper(), email_type.strip().title()]
+                            for kv in key_variants:
+                                if kv in obj and isinstance(obj[kv], str):
+                                    return jsonify({'status': 'ok', 'template': obj[kv], 'source_file': fn, 'key': kv})
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
     except Exception:
         pass
+
+    # If not found locally, and blob mode enabled, try Blob (single shared container, per-user prefix -> shared)
+    if AZURE_BLOB_TEMPLATES:
+        try:
+            # derive user token and shared container name
+            user_id = _get_request_user_id() or 'anonymous'
+            user_token = _sanitize_token(user_id)
+            shared_container = _get_shared_container()
+
+            # prefer requested source_file in user's prefix
+            if source_file:
+                txt = _blob_get_text_for_user(user_token, source_file)
+                if txt:
+                    try:
+                        obj = json.loads(txt)
+                    except Exception:
+                        return jsonify({'status': 'ok', 'template': txt, 'source_file': source_file, 'key': email_type})
+                    if isinstance(obj, dict) and 'template' in obj:
+                        return jsonify({'status': 'ok', 'template': obj.get('template'), 'source_file': source_file, 'key': email_type})
+                    if isinstance(obj, dict) and email_type in obj and isinstance(obj[email_type], str):
+                        return jsonify({'status': 'ok', 'template': obj[email_type], 'source_file': source_file, 'key': email_type})
+
+            # try direct filename match in user's prefix
+            pref = safe_type_filename(email_type) + '.json'
+            txt = _blob_get_text_for_user(user_token, pref)
+            if txt:
+                try:
+                    obj = json.loads(txt)
+                except Exception:
+                    return jsonify({'status': 'ok', 'template': txt, 'source_file': pref, 'key': email_type})
+                if isinstance(obj, dict):
+                    if email_type in obj and isinstance(obj[email_type], str):
+                        return jsonify({'status': 'ok', 'template': obj[email_type], 'source_file': pref, 'key': email_type})
+                    # variants
+                    for kv in [email_type, email_type.strip(), email_type.strip().upper(), email_type.strip().title()]:
+                        if kv in obj and isinstance(obj[kv], str):
+                            return jsonify({'status': 'ok', 'template': obj[kv], 'source_file': pref, 'key': kv})
+
+            # try scanning all user blobs
+            blobs = _blob_list_templates_for_user(user_token)
+            for b in blobs:
+                txt = _blob_get_text_for_user(user_token, b)
+                if not txt:
+                    continue
+                try:
+                    obj = json.loads(txt)
+                except Exception:
+                    if os.path.splitext(b)[0] == email_type:
+                        return jsonify({'status': 'ok', 'template': txt, 'source_file': b, 'key': email_type})
+                    continue
+                if isinstance(obj, dict):
+                    if email_type in obj and isinstance(obj[email_type], str):
+                        return jsonify({'status': 'ok', 'template': obj[email_type], 'source_file': b, 'key': email_type})
+                    for kv in [email_type, email_type.strip(), email_type.strip().upper(), email_type.strip().title()]:
+                        if kv in obj and isinstance(obj[kv], str):
+                            return jsonify({'status': 'ok', 'template': obj[kv], 'source_file': b, 'key': kv})
+
+            # fallback to shared container (no user prefix)
+            blobs = _blob_list_templates(shared_container)
+            for b in blobs:
+                txt = _blob_get_text(shared_container, b)
+                if not txt:
+                    continue
+                try:
+                    obj = json.loads(txt)
+                except Exception:
+                    if os.path.splitext(b)[0] == email_type:
+                        return jsonify({'status': 'ok', 'template': txt, 'source_file': b, 'key': email_type})
+                    continue
+                if isinstance(obj, dict):
+                    if email_type in obj and isinstance(obj[email_type], str):
+                        return jsonify({'status': 'ok', 'template': obj[email_type], 'source_file': b, 'key': email_type})
+                    for kv in [email_type, email_type.strip(), email_type.strip().upper(), email_type.strip().title()]:
+                        if kv in obj and isinstance(obj[kv], str):
+                            return jsonify({'status': 'ok', 'template': obj[kv], 'source_file': b, 'key': kv})
+        except Exception:
+            pass
 
     # Fallback to legacy aggregated store
     cur = load_templates_file()
@@ -852,11 +1234,19 @@ def save_template_for(email_type: str):
 
         # set/update the key for the selected email_type (preserve other keys)
         existing[email_type] = template
-        # remove legacy single-key 'template' if we now have named keys (optional)
         if 'template' in existing and len(existing) > 1:
             existing.pop('template', None)
 
-        atomic_write_json(group_path, existing)
+        if blob_mode_enabled():
+            # upload group JSON to user's prefix in shared container
+            user_id = _get_request_user_id() or 'anonymous'
+            user_token = _sanitize_token(user_id)
+            fname = os.path.basename(group_path)
+            payload_txt = json.dumps(existing, ensure_ascii=False)
+            if not _blob_upload_text_for_user(user_token, fname, payload_txt):
+                return jsonify({'status': 'error', 'message': 'failed to upload to blob storage'}), 500
+        else:
+            atomic_write_json(group_path, existing)
     except Exception as e:
         return jsonify({'status': 'error', 'message': f'failed to save: {e}'}), 500
     # per-file saved; no aggregated store
@@ -902,15 +1292,44 @@ def save_template_in_file():
 
 @app.route('/footer', methods=['GET'])
 def get_footer():
-    # read footer from template_files/footer.json if exists
+    # read footer from template_files/footer.json if exists (or blob storage)
     try:
+        if blob_mode_enabled():
+            user_id = _get_request_user_id() or 'anonymous'
+            user_token = _sanitize_token(user_id)
+            txt = _blob_get_text_for_user(user_token, 'footer.json')
+            if txt:
+                try:
+                    obj = json.loads(txt)
+                except Exception:
+                    return jsonify({'status': 'ok', 'footer': txt})
+                if isinstance(obj, dict):
+                    footer = obj.get('template') if 'template' in obj else obj.get('footer', '')
+                    additional = obj.get('additional_footer', '')
+                    fcs = obj.get('fcs_footer', '')
+                    return jsonify({'status': 'ok', 'footer': footer or '', 'additional_footer': additional or '', 'fcs_footer': fcs or ''})
+            # try shared container fallback
+            shared_container = _get_shared_container()
+            txt = _blob_get_text(shared_container, 'footer.json')
+            if txt:
+                try:
+                    obj = json.loads(txt)
+                except Exception:
+                    return jsonify({'status': 'ok', 'footer': txt})
+                if isinstance(obj, dict):
+                    footer = obj.get('template') if 'template' in obj else obj.get('footer', '')
+                    additional = obj.get('additional_footer', '')
+                    fcs = obj.get('fcs_footer', '')
+                    return jsonify({'status': 'ok', 'footer': footer or '', 'additional_footer': additional or '', 'fcs_footer': fcs or ''})
+            return jsonify({'status': 'ok', 'footer': ''})
+
+        # filesystem fallback
         ensure_templates_dir()
         path = os.path.join(get_template_dir(), 'footer.json')
         if os.path.exists(path):
             with open(path, 'r', encoding='utf-8-sig') as f:
                 obj = json.load(f)
                 if isinstance(obj, dict):
-                    # support multiple keys: template (legacy), additional_footer, fcs_footer
                     footer = obj.get('template') if 'template' in obj else obj.get('footer', '')
                     additional = obj.get('additional_footer', '')
                     fcs = obj.get('fcs_footer', '')
@@ -929,9 +1348,16 @@ def save_footer():
     if not isinstance(footer, str) or not isinstance(additional, str) or not isinstance(fcs, str):
         return jsonify({'status': 'error', 'message': 'footer fields must be strings'}), 400
     try:
-        ensure_templates_dir()
-        path = os.path.join(get_template_dir(), 'footer.json')
-        atomic_write_json(path, {'footer': footer, 'additional_footer': additional, 'fcs_footer': fcs})
+        if blob_mode_enabled():
+            user_id = _get_request_user_id() or 'anonymous'
+            user_token = _sanitize_token(user_id)
+            payload_txt = json.dumps({'footer': footer, 'additional_footer': additional, 'fcs_footer': fcs}, ensure_ascii=False)
+            if not _blob_upload_text_for_user(user_token, 'footer.json', payload_txt):
+                return jsonify({'status': 'error', 'message': 'failed to save footer to blob storage'}), 500
+        else:
+            ensure_templates_dir()
+            path = os.path.join(get_template_dir(), 'footer.json')
+            atomic_write_json(path, {'footer': footer, 'additional_footer': additional, 'fcs_footer': fcs})
     except Exception as e:
         return jsonify({'status': 'error', 'message': f'failed to save footer: {e}'}), 500
     return jsonify({'status': 'ok'})
@@ -943,39 +1369,88 @@ def upload_templates_zip():
     POST multipart/form-data with field 'file'. Only .json files are extracted; path traversal is prevented.
     """
     try:
-        if 'file' not in request.files:
+        files = list(request.files.getlist('file'))
+        if not files:
             return jsonify({'status': 'error', 'message': 'file field required'}), 400
-        f = request.files['file']
-        if not f or not getattr(f, 'filename', None):
-            return jsonify({'status': 'error', 'message': 'invalid file'}), 400
-        data = f.read()
-        try:
-            z = zipfile.ZipFile(io.BytesIO(data))
-        except Exception as e:
-            return jsonify({'status': 'error', 'message': f'invalid zip: {e}'}), 400
 
         saved = []
         ensure_templates_dir()
-        for member in z.namelist():
-            # normalize and prevent traversal
-            nm = os.path.normpath(member)
-            if nm.startswith('..') or os.path.isabs(nm):
-                continue
-            # skip directories
-            if nm.endswith('/') or nm.endswith('\\'):
-                continue
-            # only allow .json files
-            if not nm.lower().endswith('.json'):
-                continue
-            # use basename to avoid subdirs in zip
-            base = os.path.basename(nm)
-            dest = os.path.join(get_template_dir(), base)
+
+        dbg(f"upload_templates_zip: blob_mode={blob_mode_enabled()} AZURE_BLOB_TEMPLATES={AZURE_BLOB_TEMPLATES}")
+        try:
+            cfg = get_storage_config()
+            dbg(f"upload_templates_zip: storage_config={json.dumps(cfg, ensure_ascii=False)}")
+        except Exception:
+            pass
+
+        for f in files:
+            filename = getattr(f, 'filename', None) or 'uploaded'
+            fname = filename
+            data = f.read()
+            # detect zip by magic bytes or extension
+            is_zip = False
             try:
-                with z.open(member) as src, open(dest, 'wb') as dst:
-                    dst.write(src.read())
-                saved.append(base)
+                if data[:4] == b'PK\x03\x04' or fname.lower().endswith('.zip'):
+                    is_zip = True
             except Exception:
-                continue
+                is_zip = False
+
+            if is_zip:
+                try:
+                    z = zipfile.ZipFile(io.BytesIO(data))
+                except Exception:
+                    continue
+                for member in z.namelist():
+                    nm = os.path.normpath(member)
+                    if nm.startswith('..') or os.path.isabs(nm):
+                        continue
+                    if nm.endswith('/') or nm.endswith('\\'):
+                        continue
+                    if not nm.lower().endswith('.json'):
+                        continue
+                    base = os.path.basename(nm)
+                    try:
+                        with z.open(member) as src:
+                            txt = src.read().decode('utf-8')
+                        if blob_mode_enabled():
+                            user_id = _get_request_user_id() or 'anonymous'
+                            user_token = _sanitize_token(user_id)
+                            _blob_upload_text_for_user(user_token, base, txt)
+                        else:
+                            dest = os.path.join(get_template_dir(), base)
+                            try:
+                                parsed = json.loads(txt)
+                                atomic_write_json(dest, parsed)
+                            except Exception:
+                                atomic_write_json(dest, {'template': txt})
+                        saved.append(base)
+                    except Exception:
+                        continue
+            else:
+                # single file -> store
+                try:
+                    txt = data.decode('utf-8')
+                except Exception:
+                    try:
+                        txt = data.decode('utf-8', errors='ignore')
+                    except Exception:
+                        continue
+                if not fname.lower().endswith('.json'):
+                    fname = fname + '.json'
+                if blob_mode_enabled():
+                    user_id = _get_request_user_id() or 'anonymous'
+                    user_token = _sanitize_token(user_id)
+                    _blob_upload_text_for_user(user_token, os.path.basename(fname), txt)
+                    saved.append(os.path.basename(fname))
+                else:
+                    dest = os.path.join(get_template_dir(), os.path.basename(fname))
+                    try:
+                        parsed = json.loads(txt)
+                        atomic_write_json(dest, parsed)
+                    except Exception:
+                        atomic_write_json(dest, {'template': txt})
+                    saved.append(os.path.basename(fname))
+
         return jsonify({'status': 'ok', 'saved': saved})
     except Exception as e:
         return jsonify({'status': 'error', 'message': str(e)}), 500
@@ -999,6 +1474,8 @@ def sr_import():
             if not it.get('contact'):
                 return jsonify({'status': 'error', 'message': f'item at index {idx} missing contact'}), 400
         ensure_templates_dir()
+        user_id = _get_request_user_id() or 'anonymous'
+        user_token = _sanitize_token(user_id)
         sr_dir = os.path.join(get_template_dir(), 'sr')
         os.makedirs(sr_dir, exist_ok=True)
         # Build set of incoming filenames, save only new ones, and remove orphaned files
@@ -1013,36 +1490,84 @@ def sr_import():
             safe_fn = ''.join([c for c in str(case_no) if c.isalnum() or c in '-_'])
             fname = f'case_{safe_fn}.json'
             incoming_files.add(fname)
-            path = os.path.join(sr_dir, fname)
-            try:
-                # If existing file has replace_name, preserve it
-                if os.path.exists(path):
-                    try:
-                        with open(path, 'r', encoding='utf-8-sig') as f:
-                            existing = json.load(f)
-                    except Exception:
-                        existing = {}
-                    if isinstance(existing, dict) and existing.get('replace_name'):
-                        it['replace_name'] = existing.get('replace_name')
-                    # Preserve existing sympton (if present) so import does not wipe it
-                    if isinstance(existing, dict) and existing.get('sympton'):
-                        it['sympton'] = existing.get('sympton')
-                atomic_write_json(path, it)
-                saved += 1
-            except Exception:
-                continue
-
-        # Delete any files in sr_dir that are not present in the incoming list
-        deleted = 0
-        for fn in os.listdir(sr_dir):
-            if not fn.lower().endswith('.json'):
-                continue
-            if fn not in incoming_files:
+            # For blob mode, write as blob_files/{user_token}/sr/{fname}
+            if blob_mode_enabled():
                 try:
-                    os.remove(os.path.join(sr_dir, fn))
-                    deleted += 1
+                    # preserve existing replace_name/sympton if present in blob
+                    existing_txt = _blob_get_text_for_user(user_token, f'sr/{fname}')
+                    if existing_txt:
+                        try:
+                            existing = json.loads(existing_txt)
+                        except Exception:
+                            existing = {}
+                        if isinstance(existing, dict) and existing.get('replace_name'):
+                            it['replace_name'] = existing.get('replace_name')
+                        if isinstance(existing, dict) and existing.get('sympton'):
+                            it['sympton'] = existing.get('sympton')
+                    _blob_upload_text_for_user(user_token, f'sr/{fname}', json.dumps(it, ensure_ascii=False))
+                    saved += 1
                 except Exception:
                     continue
+            else:
+                path = os.path.join(sr_dir, fname)
+                try:
+                    # If existing file has replace_name, preserve it
+                    if os.path.exists(path):
+                        try:
+                            with open(path, 'r', encoding='utf-8-sig') as f:
+                                existing = json.load(f)
+                        except Exception:
+                            existing = {}
+                        if isinstance(existing, dict) and existing.get('replace_name'):
+                            it['replace_name'] = existing.get('replace_name')
+                        # Preserve existing sympton (if present) so import does not wipe it
+                        if isinstance(existing, dict) and existing.get('sympton'):
+                            it['sympton'] = existing.get('sympton')
+                    atomic_write_json(path, it)
+                    saved += 1
+                except Exception:
+                    continue
+
+        # Delete any files in sr_dir / blob that are not present in the incoming list
+        deleted = 0
+        if blob_mode_enabled():
+            # list blobs under template_files/{user_token}/sr/
+            try:
+                blobs = _blob_list_templates_for_user(user_token)
+                # _blob_list_templates_for_user returns names without sr/ prefix for top-level template files,
+                # but our sr entries are stored under 'sr/<fname>' so we'll list via container directly.
+                svc = get_blob_service_client()
+                if svc:
+                    container = svc.get_container_client(_get_shared_container())
+                    prefix = f'template_files/{user_token}/sr/'
+                    try:
+                        for b in container.list_blobs(name_starts_with=prefix):
+                            name = b.name[len(prefix):] if b.name.startswith(prefix) else b.name
+                            if not name:
+                                continue
+                            if name not in incoming_files:
+                                try:
+                                    _blob_delete_for_user(user_token, f'sr/{name}')
+                                    deleted += 1
+                                except Exception:
+                                    pass
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+        else:
+            try:
+                for fn in os.listdir(sr_dir):
+                    if not fn.lower().endswith('.json'):
+                        continue
+                    if fn not in incoming_files:
+                        try:
+                            os.remove(os.path.join(sr_dir, fn))
+                            deleted += 1
+                        except Exception:
+                            continue
+            except Exception:
+                pass
         return jsonify({'status': 'ok', 'saved': saved, 'deleted': deleted})
     except Exception as e:
         return jsonify({'status': 'error', 'message': str(e)}), 500
@@ -1052,27 +1577,58 @@ def sr_import():
 def sr_list():
     try:
         ensure_templates_dir()
-        sr_dir = os.path.join(get_template_dir(), 'sr')
+        user_id = _get_request_user_id() or 'anonymous'
+        user_token = _sanitize_token(user_id)
         items = []
-        if os.path.exists(sr_dir):
-            for fn in os.listdir(sr_dir):
-                if not fn.lower().endswith('.json'):
-                    continue
-                path = os.path.join(sr_dir, fn)
-                try:
-                    with open(path, 'r', encoding='utf-8-sig') as f:
-                        obj = json.load(f)
-                        if isinstance(obj, dict):
-                            items.append({
-                                'case_number': obj.get('case_number') or obj.get('case') or obj.get('caseNo'),
-                                'customer_title': obj.get('customer_title') or obj.get('customer') or '',
-                                'internal_title': obj.get('internal_title') or obj.get('internal_title') or '',
-                                'contact': obj.get('contact') or '',
-                                'replace_name': obj.get('replace_name') or '',
-                                'sympton': obj.get('sympton') or ''
-                            })
-                except Exception:
-                    continue
+        if blob_mode_enabled():
+            try:
+                svc = get_blob_service_client()
+                if svc:
+                    container = svc.get_container_client(_get_shared_container())
+                    prefix = f'template_files/{user_token}/sr/'
+                    for b in container.list_blobs(name_starts_with=prefix):
+                        name = b.name[len(prefix):] if b.name.startswith(prefix) else b.name
+                        if not name or not name.lower().endswith('.json'):
+                            continue
+                        try:
+                            txt = _blob_get_text_for_user(user_token, f'sr/{name}')
+                            if not txt:
+                                continue
+                            obj = json.loads(txt)
+                            if isinstance(obj, dict):
+                                items.append({
+                                    'case_number': obj.get('case_number') or obj.get('case') or obj.get('caseNo'),
+                                    'customer_title': obj.get('customer_title') or obj.get('customer') or '',
+                                    'internal_title': obj.get('internal_title') or obj.get('internal_title') or '',
+                                    'contact': obj.get('contact') or '',
+                                    'replace_name': obj.get('replace_name') or '',
+                                    'sympton': obj.get('sympton') or ''
+                                })
+                        except Exception:
+                            continue
+            except Exception:
+                pass
+        else:
+            sr_dir = os.path.join(get_template_dir(), 'sr')
+            if os.path.exists(sr_dir):
+                for fn in os.listdir(sr_dir):
+                    if not fn.lower().endswith('.json'):
+                        continue
+                    path = os.path.join(sr_dir, fn)
+                    try:
+                        with open(path, 'r', encoding='utf-8-sig') as f:
+                            obj = json.load(f)
+                            if isinstance(obj, dict):
+                                items.append({
+                                    'case_number': obj.get('case_number') or obj.get('case') or obj.get('caseNo'),
+                                    'customer_title': obj.get('customer_title') or obj.get('customer') or '',
+                                    'internal_title': obj.get('internal_title') or obj.get('internal_title') or '',
+                                    'contact': obj.get('contact') or '',
+                                    'replace_name': obj.get('replace_name') or '',
+                                    'sympton': obj.get('sympton') or ''
+                                })
+                    except Exception:
+                        continue
         return jsonify({'status': 'ok', 'items': items})
     except Exception as e:
         return jsonify({'status': 'error', 'message': str(e)}), 500
@@ -1093,26 +1649,52 @@ def sr_replace():
         safe_fn = ''.join([c for c in str(case_no) if c.isalnum() or c in '-_'])
         fname = f'case_{safe_fn}.json'
         path = os.path.join(sr_dir, fname)
-        if not os.path.exists(path):
-            return jsonify({'status': 'error', 'message': 'case file not found'}), 404
-        with open(path, 'r', encoding='utf-8-sig') as f:
-            obj = json.load(f)
-        if action == 'set':
-            if not isinstance(replace_name, str):
-                return jsonify({'status': 'error', 'message': 'replace_name must be string for set action'}), 400
-            obj['replace_name'] = replace_name
-            # if sympton provided as string, store it as well
-            if isinstance(sympton, str):
-                obj['sympton'] = sympton
-        elif action == 'reset':
-            if 'replace_name' in obj:
-                obj.pop('replace_name', None)
-            # reset sympton as well when resetting replace_name
-            if 'sympton' in obj:
-                obj.pop('sympton', None)
+        user_id = _get_request_user_id() or 'anonymous'
+        user_token = _sanitize_token(user_id)
+        if blob_mode_enabled():
+            # read existing from blob
+            existing_txt = _blob_get_text_for_user(user_token, f'sr/{fname}')
+            if not existing_txt:
+                return jsonify({'status': 'error', 'message': 'case file not found'}), 404
+            try:
+                obj = json.loads(existing_txt)
+            except Exception:
+                obj = {}
+            if action == 'set':
+                if not isinstance(replace_name, str):
+                    return jsonify({'status': 'error', 'message': 'replace_name must be string for set action'}), 400
+                obj['replace_name'] = replace_name
+                if isinstance(sympton, str):
+                    obj['sympton'] = sympton
+            elif action == 'reset':
+                if 'replace_name' in obj:
+                    obj.pop('replace_name', None)
+                if 'sympton' in obj:
+                    obj.pop('sympton', None)
+            else:
+                return jsonify({'status': 'error', 'message': "invalid action, use 'set' or 'reset'"}), 400
+            _blob_upload_text_for_user(user_token, f'sr/{fname}', json.dumps(obj, ensure_ascii=False))
         else:
-            return jsonify({'status': 'error', 'message': "invalid action, use 'set' or 'reset'"}), 400
-        atomic_write_json(path, obj)
+            if not os.path.exists(path):
+                return jsonify({'status': 'error', 'message': 'case file not found'}), 404
+            with open(path, 'r', encoding='utf-8-sig') as f:
+                obj = json.load(f)
+            if action == 'set':
+                if not isinstance(replace_name, str):
+                    return jsonify({'status': 'error', 'message': 'replace_name must be string for set action'}), 400
+                obj['replace_name'] = replace_name
+                # if sympton provided as string, store it as well
+                if isinstance(sympton, str):
+                    obj['sympton'] = sympton
+            elif action == 'reset':
+                if 'replace_name' in obj:
+                    obj.pop('replace_name', None)
+                # reset sympton as well when resetting replace_name
+                if 'sympton' in obj:
+                    obj.pop('sympton', None)
+            else:
+                return jsonify({'status': 'error', 'message': "invalid action, use 'set' or 'reset'"}), 400
+            atomic_write_json(path, obj)
         return jsonify({'status': 'ok'})
     except Exception as e:
         return jsonify({'status': 'error', 'message': str(e)}), 500
@@ -1122,11 +1704,22 @@ def sr_replace():
 def get_owner():
     try:
         ensure_templates_dir()
-        path = os.path.join(get_template_dir(), 'owner.json')
-        if os.path.exists(path):
-            with open(path, 'r', encoding='utf-8-sig') as f:
-                obj = json.load(f)
-                return jsonify({'status': 'ok', 'owner': obj})
+        try:
+            if blob_mode_enabled():
+                user_id = _get_request_user_id() or 'anonymous'
+                user_token = _sanitize_token(user_id)
+                txt = _blob_get_text_for_user(user_token, 'owner.json')
+                if txt:
+                    obj = json.loads(txt)
+                    return jsonify({'status': 'ok', 'owner': obj})
+            else:
+                path = os.path.join(get_template_dir(), 'owner.json')
+                if os.path.exists(path):
+                    with open(path, 'r', encoding='utf-8-sig') as f:
+                        obj = json.load(f)
+                        return jsonify({'status': 'ok', 'owner': obj})
+        except Exception:
+            pass
     except Exception:
         pass
     return jsonify({'status': 'ok', 'owner': {}})
@@ -1140,8 +1733,13 @@ def save_owner():
         return jsonify({'status': 'error', 'message': 'owner must be an object'}), 400
     try:
         ensure_templates_dir()
-        path = os.path.join(get_template_dir(), 'owner.json')
-        atomic_write_json(path, owner)
+        user_id = _get_request_user_id() or 'anonymous'
+        user_token = _sanitize_token(user_id)
+        if blob_mode_enabled():
+            _blob_upload_text_for_user(user_token, 'owner.json', json.dumps(owner, ensure_ascii=False))
+        else:
+            path = os.path.join(get_template_dir(), 'owner.json')
+            atomic_write_json(path, owner)
     except Exception as e:
         return jsonify({'status': 'error', 'message': f'failed to save owner: {e}'}), 500
     return jsonify({'status': 'ok'})
@@ -1206,15 +1804,50 @@ def save_config():
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
+@app.route('/storage_config', methods=['GET'])
+def api_get_storage_config():
+    try:
+        cfg = get_storage_config()
+        return jsonify({'status': 'ok', 'config': cfg})
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/storage_config', methods=['POST'])
+def api_set_storage_config():
+    payload = request.json or {}
+    mode = payload.get('mode')
+    storage_account = payload.get('storage_account')
+    container = payload.get('container')
+    if mode not in ('local', 'blob'):
+        return jsonify({'status': 'error', 'message': "mode must be 'local' or 'blob'"}), 400
+    ok = save_storage_config(mode, storage_account, container)
+    if not ok:
+        return jsonify({'status': 'error', 'message': 'failed to save storage config'}), 500
+    return jsonify({'status': 'ok'})
+
+
 @app.route('/phone_statuses', methods=['GET'])
 def phone_statuses():
     try:
         ensure_templates_dir()
-        path = os.path.join(get_template_dir(), 'phone.json')
-        if not os.path.exists(path):
+        # try blob first when enabled
+        try:
+            if blob_mode_enabled():
+                user_id = _get_request_user_id() or 'anonymous'
+                user_token = _sanitize_token(user_id)
+                txt = _blob_get_text_for_user(user_token, 'phone.json')
+                if not txt:
+                    return jsonify({'items': []})
+                j = json.loads(txt)
+            else:
+                path = os.path.join(get_template_dir(), 'phone.json')
+                if not os.path.exists(path):
+                    return jsonify({'items': []})
+                with open(path, 'r', encoding='utf-8') as f:
+                    j = json.load(f)
+        except Exception:
             return jsonify({'items': []})
-        with open(path, 'r', encoding='utf-8') as f:
-            j = json.load(f)
         items = []
         if isinstance(j, dict):
             for k, v in j.items():
@@ -1234,16 +1867,30 @@ def phone_statuses():
 def nextc_options():
     try:
         ensure_templates_dir()
-        path = os.path.join(get_template_dir(), 'nextc.json')
-        if not os.path.exists(path):
-            # fallback to holidays.json if present
-            path2 = os.path.join(get_template_dir(), 'holidays.json')
-            if os.path.exists(path2):
-                path = path2
+        try:
+            if blob_mode_enabled():
+                user_id = _get_request_user_id() or 'anonymous'
+                user_token = _sanitize_token(user_id)
+                txt = _blob_get_text_for_user(user_token, 'nextc.json')
+                if not txt:
+                    # fallback to holidays.json in blob
+                    txt = _blob_get_text_for_user(user_token, 'holidays.json')
+                if not txt:
+                    return jsonify({'items': []})
+                j = json.loads(txt)
             else:
-                return jsonify({'items': []})
-        with open(path, 'r', encoding='utf-8') as f:
-            j = json.load(f)
+                path = os.path.join(get_template_dir(), 'nextc.json')
+                if not os.path.exists(path):
+                    # fallback to holidays.json if present
+                    path2 = os.path.join(get_template_dir(), 'holidays.json')
+                    if os.path.exists(path2):
+                        path = path2
+                    else:
+                        return jsonify({'items': []})
+                with open(path, 'r', encoding='utf-8') as f:
+                    j = json.load(f)
+        except Exception:
+            return jsonify({'items': []})
         items = []
         if isinstance(j, dict):
             for k, v in j.items():
@@ -1263,11 +1910,22 @@ def nextc_options():
 def holidays_list():
     try:
         ensure_templates_dir()
-        path = os.path.join(get_template_dir(), 'holidays.json')
-        if not os.path.exists(path):
+        try:
+            if blob_mode_enabled():
+                user_id = _get_request_user_id() or 'anonymous'
+                user_token = _sanitize_token(user_id)
+                txt = _blob_get_text_for_user(user_token, 'holidays.json')
+                if not txt:
+                    return jsonify({'dates': []})
+                j = json.loads(txt)
+            else:
+                path = os.path.join(get_template_dir(), 'holidays.json')
+                if not os.path.exists(path):
+                    return jsonify({'dates': []})
+                with open(path, 'r', encoding='utf-8') as f:
+                    j = json.load(f)
+        except Exception:
             return jsonify({'dates': []})
-        with open(path, 'r', encoding='utf-8') as f:
-            j = json.load(f)
         dates = []
         if isinstance(j, dict):
             # keys are ISO dates
@@ -1352,19 +2010,39 @@ def render_template_server():
     # server-side: try to fill <offer_meeting> from meeting.json if present (use first label as fallback)
     try:
         meeting_label = ''
-        mpath = os.path.join(get_template_dir(), 'meeting.json')
-        if os.path.exists(mpath):
-            with open(mpath, 'r', encoding='utf-8') as mf:
-                mj = json.load(mf)
-            if isinstance(mj, dict):
-                # keys are labels
-                for k in mj.keys():
-                    meeting_label = k
-                    break
-            elif isinstance(mj, list) and mj:
-                first = mj[0]
-                if isinstance(first, dict) and 'label' in first:
-                    meeting_label = first.get('label') or ''
+        mj = None
+        try:
+            if blob_mode_enabled():
+                user_id = _get_request_user_id() or 'anonymous'
+                user_token = _sanitize_token(user_id)
+                txt = _blob_get_text_for_user(user_token, 'meeting.json')
+                if txt:
+                    try:
+                        mj = json.loads(txt)
+                    except Exception:
+                        mj = None
+            # fallback to local file when blob missing or not enabled
+            if mj is None:
+                mpath = os.path.join(get_template_dir(), 'meeting.json')
+                if os.path.exists(mpath):
+                    try:
+                        with open(mpath, 'r', encoding='utf-8') as mf:
+                            mj = json.load(mf)
+                    except Exception:
+                        mj = None
+        except Exception:
+            mj = None
+
+        if isinstance(mj, dict):
+            # keys are labels
+            for k in mj.keys():
+                meeting_label = k
+                break
+        elif isinstance(mj, list) and mj:
+            first = mj[0]
+            if isinstance(first, dict) and 'label' in first:
+                meeting_label = first.get('label') or ''
+
         if meeting_label and str(meeting_label).strip() != '無し':
             out = out.replace('<offer_meeting>', meeting_label)
         else:
@@ -1517,11 +2195,25 @@ def pick_config_dir():
 def meeting_options():
     try:
         ensure_templates_dir()
-        path = os.path.join(get_template_dir(), 'meeting.json')
-        if not os.path.exists(path):
+        try:
+            dbg('meeting_options: blob_mode=' + str(blob_mode_enabled()))
+            if blob_mode_enabled():
+                user_id = _get_request_user_id() or 'anonymous'
+                user_token = _sanitize_token(user_id)
+                txt = _blob_get_text_for_user(user_token, 'meeting.json')
+                if not txt:
+                    return jsonify({'items': []})
+                j = json.loads(txt)
+            else:
+                path = os.path.join(get_template_dir(), 'meeting.json')
+                if not os.path.exists(path):
+                    return jsonify({'items': []})
+                with open(path, 'r', encoding='utf-8') as f:
+                    j = json.load(f)
+        except Exception as ee:
+            dbg('meeting_options: error reading meeting.json: ' + str(ee))
             return jsonify({'items': []})
-        with open(path, 'r', encoding='utf-8') as f:
-            j = json.load(f)
+
         items = []
         if isinstance(j, dict):
             for k, v in j.items():
@@ -1534,6 +2226,7 @@ def meeting_options():
                     items.append({'label': entry.get('label'), 'value': val})
         return jsonify({'items': items})
     except Exception as e:
+        dbg('meeting_options: unexpected error: ' + str(e))
         return jsonify({'items': [], 'error': str(e)}), 500
 
 if __name__ == '__main__':

@@ -200,7 +200,7 @@ async function loadFooterFromServer(){
 }
 loadFooterFromServer();
 
-// Load templates from local PC (client-side) and merge into templatesStore
+// Local PC load functionality: allow user to select .json or .zip files and upload to server
 {
   const loadFromPcBtn = document.getElementById('loadFromPcBtn');
   const loadTemplatesInput = document.getElementById('loadTemplatesInput');
@@ -208,47 +208,47 @@ loadFooterFromServer();
     loadFromPcBtn.addEventListener('click', function(){ loadTemplatesInput.click(); });
     loadTemplatesInput.addEventListener('change', async function(ev){
       const files = Array.from(ev.target.files || []);
-      if (!files.length) return;
-      let merged = 0;
-      for (const f of files){
-        try{
-          if (!f.name.toLowerCase().endsWith('.json')) continue;
-          const txt = await f.text();
-          try{
-            const parsed = JSON.parse(txt);
-            if (typeof parsed === 'string'){
-              // If file contains a single template string, infer key from filename
-              const key = f.name.replace(/\.json$/i, '');
-              templatesStore[key] = parsed;
-              merged++;
-            } else if (typeof parsed === 'object' && parsed !== null){
-              // if object contains 'template' -> single template
-              if (typeof parsed.template === 'string'){
-                const key = f.name.replace(/\.json$/i, '');
-                templatesStore[key] = parsed.template;
-                merged++;
-              } else {
-                // merge keys
-                for (const k of Object.keys(parsed)){
-                  if (typeof parsed[k] === 'string'){
-                    templatesStore[k] = parsed[k];
-                    merged++;
-                  }
-                }
-              }
+      if (!files.length){ alert('ファイルを選択してください'); return; }
+      // If multiple files or any non-zip file, and more than one file selected, create a zip on client-side
+      try{
+        let useZip = false;
+        if (files.length > 1) useZip = true;
+        // If single file and it's a .json, upload as-is; if .zip upload as-is
+        const form = new FormData();
+        if (!useZip && files.length === 1){
+          const f = files[0];
+          form.append('file', f, f.name);
+        } else {
+          // build a zip client-side to preserve filenames
+          // use JSZip if available; otherwise send first file only (best-effort)
+          if (typeof JSZip !== 'undefined'){
+            const zip = new JSZip();
+            for (const f of files){
+              const txt = await f.text();
+              zip.file(f.name, txt);
             }
-          }catch(e){ console.warn('failed parse local template', f.name, e); }
-        }catch(e){ console.warn('failed read file', f.name, e); }
+            const blob = await zip.generateAsync({type:'blob'});
+            form.append('file', blob, 'templates_upload.zip');
+          } else {
+            // fallback: append files individually as multiple 'file' fields
+            for (const f of files) form.append('file', f, f.name);
+          }
+        }
+        const res = await fetch('/templates/upload', { method: 'POST', body: form });
+        let j = null;
+        try{ j = await res.json(); }catch(e){ j = null; }
+        if (res.ok && j && j.status === 'ok'){
+          alert('アップロード完了: ' + (j.saved ? j.saved.join(',') : 'OK'));
+          try{ await loadTemplateKeys(); }catch(e){}
+        } else {
+          alert('アップロードに失敗しました: ' + (j && j.message ? j.message : res.statusText));
+        }
+      } catch(e){
+        console.error('upload failed', e);
+        alert('アップロード処理でエラーが発生しました');
+      } finally{
+        try{ loadTemplatesInput.value = ''; }catch(e){}
       }
-      if (merged > 0){
-        saveTemplatesToStorage();
-        try{ await loadTemplateKeys(); }catch(e){}
-        alert('ローカルテンプレートを読み込みました: ' + merged + ' files/entries');
-      } else {
-        alert('有効なテンプレートファイルが見つかりませんでした');
-      }
-      // reset input
-      try{ loadTemplatesInput.value = ''; }catch(e){}
     });
   }
 }
@@ -462,12 +462,22 @@ if (document.readyState === 'loading'){
 // Load phone statuses and populate phoneStatus select
 async function loadPhoneStatuses(){
   try{
-    const res = await fetch('/phone_statuses');
-    if (!res.ok) return;
-    const j = await res.json();
+    // If a client-side cache was loaded (from local PC import), prefer it
+    if (window.__phoneItems && Array.isArray(window.__phoneItems)){
+      const j = { items: window.__phoneItems };
+      // proceed below with j
+      
+      // cache phone items for preview replacements (ensure global set)
+      window.__phoneItems = j.items;
+    } else {
+      const res = await fetch('/phone_statuses');
+      if (!res.ok) return;
+      const j = await res.json();
       if (!j || !Array.isArray(j.items)) return;
       // cache phone items for preview replacements
       window.__phoneItems = j.items;
+    }
+    const j = { items: window.__phoneItems };
       const select = document.getElementById('phoneStatus');
       if (!select) return;
       // clear existing options
@@ -502,12 +512,18 @@ loadPhoneStatuses();
 // Load meeting options from meeting.json and populate meetingStatus select
 async function loadMeetingOptions(){
   try{
-    const res = await fetch('/meeting_options');
-    if (!res.ok) return;
-    const j = await res.json();
-    if (!j || !Array.isArray(j.items)) return;
-    // cache meeting options for preview replacements
-    window.__meetingItems = j.items;
+    // Prefer client-side cache if present
+    if (window.__meetingItems && Array.isArray(window.__meetingItems)){
+      const j = { items: window.__meetingItems };
+      window.__meetingItems = j.items;
+    } else {
+      const res = await fetch('/meeting_options');
+      if (!res.ok) return;
+      const j = await res.json();
+      if (!j || !Array.isArray(j.items)) return;
+      window.__meetingItems = j.items;
+    }
+    const j = { items: window.__meetingItems };
     const select = document.getElementById('meetingStatus');
     if (!select) return;
     // clear existing options
@@ -541,12 +557,18 @@ loadMeetingOptions();
 // Load NextC options from nextc.json (or holidays.json fallback) and populate nextC select
 async function loadNextcOptions(){
   try{
-    const res = await fetch('/nextc');
-    if (!res.ok) return;
-    const j = await res.json();
-    if (!j || !Array.isArray(j.items)) return;
-    // cache nextc items for preview replacements
-    window.__nextcItems = j.items;
+    // Prefer client-side cache if present
+    if (window.__nextcItems && Array.isArray(window.__nextcItems)){
+      const j = { items: window.__nextcItems };
+      window.__nextcItems = j.items;
+    } else {
+      const res = await fetch('/nextc');
+      if (!res.ok) return;
+      const j = await res.json();
+      if (!j || !Array.isArray(j.items)) return;
+      window.__nextcItems = j.items;
+    }
+    const j = { items: window.__nextcItems };
     const select = document.getElementById('nextC');
     if (!select) return;
     // clear existing options
@@ -648,9 +670,15 @@ async function loadSrList(){
     const input = document.getElementById('srNumberInput');
     const datalist = document.getElementById('srList');
     if (!input || !datalist) return;
-    const res = await fetch('/sr/list');
-    if (!res.ok) return;
-    const j = await res.json();
+    // Support client-side loaded SR lists
+    let j = null;
+    if (window.__srItems && Array.isArray(window.__srItems)){
+      j = { items: window.__srItems };
+    } else {
+      const res = await fetch('/sr/list');
+      if (!res.ok) return;
+      j = await res.json();
+    }
     if (!j || !j.items) return;
     // clear existing datalist options
     while(datalist.firstChild) datalist.removeChild(datalist.firstChild);
@@ -1387,6 +1415,7 @@ function applySyncPlaceholders(template){
     }catch(e){}
 
     if (cname){ out = out.replace(/<customer_name>/g, cname); }
+    if (sr){ out = out.replace(/<sr_number>/g, sr); }
     if (titleVal){ out = out.replace(/<sr_title>/g, titleVal); out = out.replace(/<title>/g, titleVal); }
     if (contentVal){ out = out.replace(/<sr_body>/g, contentVal); out = out.replace(/<content>/g, contentVal); }
     if (nextc){ out = out.replace(/<nextc>/g, nextc); out = out.replace(/<nextC>/g, nextc); }
@@ -2057,6 +2086,10 @@ const templateDirInput = document.getElementById('templateDirInput');
 const saveConfigBtn = document.getElementById('saveConfigBtn');
 const cancelConfigBtn = document.getElementById('cancelConfigBtn');
 const pickConfigBtn = document.getElementById('pickConfigBtn');
+const storageModeRadios = document.getElementsByName('storageMode');
+const storageConfigFields = document.getElementById('storageConfigFields');
+const storageAccountInput = document.getElementById('storageAccountInput');
+const storageContainerInput = document.getElementById('storageContainerInput');
 
 async function loadConfig(){
   try{
@@ -2075,6 +2108,8 @@ if (changeDirBtn){
     configModal.setAttribute('aria-hidden','false');
     const td = await loadConfig();
     if (td && templateDirInput) templateDirInput.value = td;
+      // load storage config when opening modal
+      try{ const r = await fetch('/storage_config'); if (r && r.ok){ const j = await r.json(); if (j && j.status === 'ok' && j.config){ const cfg = j.config; if (cfg.mode === 'blob'){ for (const rdo of storageModeRadios) if (rdo.value === 'blob') rdo.checked = true; storageConfigFields.style.display='block'; } else { for (const rdo of storageModeRadios) if (rdo.value === 'local') rdo.checked = true; storageConfigFields.style.display='none'; } if (storageAccountInput) storageAccountInput.value = cfg.storage_account || ''; if (storageContainerInput) storageContainerInput.value = cfg.container || ''; } } }catch(e){ console.error('failed to load storage_config', e); }
     if (templateDirInput) templateDirInput.focus();
   });
 }
@@ -2098,8 +2133,19 @@ if (saveConfigBtn){
         alert('保存に失敗しました: ' + (j && j.message ? j.message : res.statusText));
         return;
       }
-      alert('テンプレート保存先を保存しました: ' + (j.template_dir || v));
-      // reload template keys and sr list
+      // now save storage config
+      const mode = (()=>{ for (const r of storageModeRadios) if (r.checked) return r.value; return 'local'; })();
+      const sc = { mode: mode };
+      if (mode === 'blob'){
+        sc.storage_account = storageAccountInput ? storageAccountInput.value.trim() : '';
+        sc.container = storageContainerInput ? storageContainerInput.value.trim() : '';
+      }
+      const scRes = await postJson('/storage_config', sc);
+      if (!scRes || scRes.status !== 'ok'){
+        alert('storage config 保存に失敗しました: ' + (scRes && scRes.message ? scRes.message : 'unknown'));
+        return;
+      }
+      alert('テンプレート保存先とストレージ設定を保存しました');
       try{ await loadTemplateKeys(); }catch(e){}
       try{ await loadSrList(); }catch(e){}
       if (configModal) { configModal.style.display='none'; configModal.setAttribute('aria-hidden','true'); }
@@ -2127,3 +2173,12 @@ if (pickConfigBtn){
     }catch(e){ alert('Explorer 選択に失敗しました: ' + e); }
   });
 }
+
+// storage mode radio change handlers (toggle fields)
+try{
+  for (const r of (storageModeRadios || [])){
+    r.addEventListener('change', function(){
+      try{ if (this.value === 'blob') storageConfigFields.style.display = 'block'; else storageConfigFields.style.display = 'none'; }catch(e){}
+    });
+  }
+}catch(e){}
