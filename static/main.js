@@ -2064,6 +2064,10 @@ if (pickConfigBtn){
         templateDirInput.value = j.template_dir;
       } else if (j && j.status === 'cancelled'){
         // user cancelled the dialog
+      } else if (j && j.status === 'unavailable'){
+        // Non-GUI host: populate the input with the resolved template_dir and show info
+        if (j.template_dir) templateDirInput.value = j.template_dir;
+        alert('Explorer 選択はこのホストでは利用できません。代わりに以下のパスを表示しました。\n' + (j.template_dir || '')); 
       } else {
         alert('Explorer 選択に失敗しました: ' + (j && j.message ? j.message : 'unknown'));
       }

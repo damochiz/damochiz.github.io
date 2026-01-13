@@ -73,3 +73,6 @@ Per-user template directories:
 Template Dir button on headless hosts (App Service / containers):
 - On hosts without a GUI (for example Azure App Service Linux or container instances) the native folder picker cannot run. Using the `Template Dir` button will return a JSON response containing `status: "unavailable"` and the currently resolved `template_dir`.
 - To change the template directory on headless hosts, either POST to `/config` with JSON `{ "template_dir": "<path>" }` or set the environment variable `CREATEMAIL_TEMPLATE_DIR` (or `CREATE_MAIL_TEMPLATE_DIR`) and restart the app.
+
+Note about Windows paths on non-Windows hosts:
+- If you set a Windows-style path (for example `C:\Users\you\createmailapp\template_files`) from a headless host (Azure App Service), the server will now preserve that exact string in `config.json` rather than attempting to call `os.path.abspath` on it (which previously caused `/tmp/.../C:\...` to appear).

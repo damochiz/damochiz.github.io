@@ -51,6 +51,16 @@ def get_template_dir():
                 if isinstance(cfg, dict):
                     td = cfg.get('template_dir')
                     if isinstance(td, str) and td:
+                        # If the configured path is a Windows absolute path (e.g. C:\...) but
+                        # this process is running on non-Windows, do not call os.path.abspath
+                        # (which would prepend the Linux cwd and produce /tmp/.../C:\...).
+                        try:
+                            import re
+                            is_win_abs = bool(re.match(r'^[A-Za-z]:[\\/]|^\\\\', td))
+                        except Exception:
+                            is_win_abs = False
+                        if is_win_abs and platform.system() != 'Windows':
+                            return td
                         return os.path.abspath(os.path.expanduser(td))
     except Exception:
         pass
@@ -1120,13 +1130,29 @@ def save_config():
     if td is None:
         return jsonify({'status': 'error', 'message': 'template_dir required'}), 400
     try:
-        # ensure directory exists or can be created
+        # If td looks like a Windows absolute path but we are running on non-Windows,
+        # preserve the raw value in config.json without resolving or trying to create it.
+        try:
+            import re
+            is_win_abs = bool(re.match(r'^[A-Za-z]:[\\/]|^\\\\', td))
+        except Exception:
+            is_win_abs = False
+
+        if is_win_abs and platform.system() != 'Windows':
+            td_resolved = td
+            try:
+                with open(CONFIG_PATH, 'w', encoding='utf-8') as f:
+                    json.dump({'template_dir': td_resolved}, f, ensure_ascii=False, indent=2)
+            except Exception:
+                return jsonify({'status': 'error', 'message': 'failed to write config'}), 500
+            return jsonify({'status': 'ok', 'template_dir': td_resolved})
+
+        # For non-Windows paths (or when running on Windows), resolve and ensure directory exists
         td_resolved = os.path.abspath(os.path.expanduser(td))
         try:
             os.makedirs(td_resolved, exist_ok=True)
         except Exception:
             pass
-        # write config
         with open(CONFIG_PATH, 'w', encoding='utf-8') as f:
             json.dump({'template_dir': td_resolved}, f, ensure_ascii=False, indent=2)
         return jsonify({'status': 'ok', 'template_dir': td_resolved})
