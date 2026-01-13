@@ -186,6 +186,9 @@ def preview():
     return jsonify({'preview': preview_text})
 
 
+DISABLE_WINDOWS_AUTOMATION = os.environ.get('DISABLE_WINDOWS_AUTOMATION', '1' if os.environ.get('WERKZEUG_RUN_MAIN') else '0')
+
+
 @app.route('/create_mail', methods=['POST'])
 def create_mail():
     data = request.json or {}
@@ -193,9 +196,9 @@ def create_mail():
     body = data.get('content') or data.get('preview') or ''
     subject = data.get('title') or data.get('emailType') or ''
 
-    # Only attempt Outlook automation on Windows
-    if platform.system() != 'Windows':
-        return jsonify({'status': 'error', 'message': 'Outlook automation is only supported on Windows.'}), 400
+    # Only attempt Outlook automation on Windows and when not disabled by env
+    if DISABLE_WINDOWS_AUTOMATION.lower() in ('1', 'true', 'yes') or platform.system() != 'Windows':
+        return jsonify({'status': 'error', 'message': 'Outlook automation is disabled or only supported on Windows.'}), 400
 
     try:
         import win32com.client
@@ -250,9 +253,9 @@ def create_schedule():
     if not start_iso or not end_iso:
         return jsonify({'status': 'error', 'message': 'start_iso and end_iso are required'}), 400
 
-    # Only attempt Outlook automation on Windows
-    if platform.system() != 'Windows':
-        return jsonify({'status': 'error', 'message': 'Outlook scheduling is only supported on Windows.'}), 400
+    # Only attempt Outlook automation on Windows and when not disabled by env
+    if DISABLE_WINDOWS_AUTOMATION.lower() in ('1', 'true', 'yes') or platform.system() != 'Windows':
+        return jsonify({'status': 'error', 'message': 'Outlook scheduling is disabled or only supported on Windows.'}), 400
 
     try:
         # compute a short-lived dedupe key for this schedule request

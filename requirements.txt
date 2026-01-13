@@ -1,4 +1,11 @@
 Flask==2.3.2
 
+# Use a WSGI server for production on Linux
+gunicorn==22.1.0
+
+# Optional Windows-only automation package (not required on Linux Web App)
+pywin32==305
+Flask==2.3.2
+
 # Optional: add other packages if needed
 pywin32==305
