@@ -76,3 +76,13 @@ Template Dir button on headless hosts (App Service / containers):
 
 Note about Windows paths on non-Windows hosts:
 - If you set a Windows-style path (for example `C:\Users\you\createmailapp\template_files`) from a headless host (Azure App Service), the server will now preserve that exact string in `config.json` rather than attempting to call `os.path.abspath` on it (which previously caused `/tmp/.../C:\...` to appear).
+
+Uploading templates on headless hosts:
+- If you cannot use the Explorer picker on headless hosts, you can upload a ZIP archive containing `.json` template files using the `/templates/upload` endpoint. The server will extract `.json` files into the resolved template directory.
+
+Example (curl):
+```bash
+curl -X POST -F "file=@templates.zip" http://<your-app>/templates/upload
+```
+
+Only files with a `.json` extension are extracted; path traversal in ZIP entries is prevented and subdirectories are flattened.

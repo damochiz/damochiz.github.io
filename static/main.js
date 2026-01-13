@@ -200,6 +200,59 @@ async function loadFooterFromServer(){
 }
 loadFooterFromServer();
 
+// Load templates from local PC (client-side) and merge into templatesStore
+{
+  const loadFromPcBtn = document.getElementById('loadFromPcBtn');
+  const loadTemplatesInput = document.getElementById('loadTemplatesInput');
+  if (loadFromPcBtn && loadTemplatesInput){
+    loadFromPcBtn.addEventListener('click', function(){ loadTemplatesInput.click(); });
+    loadTemplatesInput.addEventListener('change', async function(ev){
+      const files = Array.from(ev.target.files || []);
+      if (!files.length) return;
+      let merged = 0;
+      for (const f of files){
+        try{
+          if (!f.name.toLowerCase().endsWith('.json')) continue;
+          const txt = await f.text();
+          try{
+            const parsed = JSON.parse(txt);
+            if (typeof parsed === 'string'){
+              // If file contains a single template string, infer key from filename
+              const key = f.name.replace(/\.json$/i, '');
+              templatesStore[key] = parsed;
+              merged++;
+            } else if (typeof parsed === 'object' && parsed !== null){
+              // if object contains 'template' -> single template
+              if (typeof parsed.template === 'string'){
+                const key = f.name.replace(/\.json$/i, '');
+                templatesStore[key] = parsed.template;
+                merged++;
+              } else {
+                // merge keys
+                for (const k of Object.keys(parsed)){
+                  if (typeof parsed[k] === 'string'){
+                    templatesStore[k] = parsed[k];
+                    merged++;
+                  }
+                }
+              }
+            }
+          }catch(e){ console.warn('failed parse local template', f.name, e); }
+        }catch(e){ console.warn('failed read file', f.name, e); }
+      }
+      if (merged > 0){
+        saveTemplatesToStorage();
+        try{ await loadTemplateKeys(); }catch(e){}
+        alert('ローカルテンプレートを読み込みました: ' + merged + ' files/entries');
+      } else {
+        alert('有効なテンプレートファイルが見つかりませんでした');
+      }
+      // reset input
+      try{ loadTemplatesInput.value = ''; }catch(e){}
+    });
+  }
+}
+
 // Cached holidays set to reduce fetch latency and ensure availability
 let cachedHolidaysSet = null;
 async function loadHolidaysToCache(){

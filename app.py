@@ -10,6 +10,8 @@ import threading
 import time
 import hashlib
 import subprocess
+import zipfile
+import io
 
 
 def dbg(msg):
@@ -935,6 +937,50 @@ def save_footer():
     return jsonify({'status': 'ok'})
 
 
+@app.route('/templates/upload', methods=['POST'])
+def upload_templates_zip():
+    """Upload a ZIP file containing .json template files and extract them into the template directory.
+    POST multipart/form-data with field 'file'. Only .json files are extracted; path traversal is prevented.
+    """
+    try:
+        if 'file' not in request.files:
+            return jsonify({'status': 'error', 'message': 'file field required'}), 400
+        f = request.files['file']
+        if not f or not getattr(f, 'filename', None):
+            return jsonify({'status': 'error', 'message': 'invalid file'}), 400
+        data = f.read()
+        try:
+            z = zipfile.ZipFile(io.BytesIO(data))
+        except Exception as e:
+            return jsonify({'status': 'error', 'message': f'invalid zip: {e}'}), 400
+
+        saved = []
+        ensure_templates_dir()
+        for member in z.namelist():
+            # normalize and prevent traversal
+            nm = os.path.normpath(member)
+            if nm.startswith('..') or os.path.isabs(nm):
+                continue
+            # skip directories
+            if nm.endswith('/') or nm.endswith('\\'):
+                continue
+            # only allow .json files
+            if not nm.lower().endswith('.json'):
+                continue
+            # use basename to avoid subdirs in zip
+            base = os.path.basename(nm)
+            dest = os.path.join(get_template_dir(), base)
+            try:
+                with z.open(member) as src, open(dest, 'wb') as dst:
+                    dst.write(src.read())
+                saved.append(base)
+            except Exception:
+                continue
+        return jsonify({'status': 'ok', 'saved': saved})
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
 @app.route('/sr/import', methods=['POST'])
 def sr_import():
     payload = request.json or {}
@@ -1370,10 +1416,20 @@ def render_template_server():
 def pick_config_dir():
     # Run pick_dir.py in subprocess to show native dialog on main thread
     try:
-        # If we're not on Windows or there's no GUI (e.g. App Service / Linux container),
-        # do not attempt to launch the tkinter-based picker. Return a helpful message
-        # and the resolved template dir so the caller can set it manually.
-        if platform.system() != 'Windows' or not os.environ.get('DISPLAY'):
+        # Determine whether a native GUI picker can be launched.
+        # On Windows we assume a GUI is available when running locally.
+        # On non-Windows hosts require DISPLAY/Wayland/XDG session indicators.
+        has_gui = False
+        try:
+            if platform.system() == 'Windows':
+                has_gui = True
+            else:
+                if os.environ.get('DISPLAY') or os.environ.get('WAYLAND_DISPLAY') or os.environ.get('XDG_SESSION_TYPE'):
+                    has_gui = True
+        except Exception:
+            has_gui = False
+
+        if not has_gui:
             try:
                 td = get_template_dir()
             except Exception:
