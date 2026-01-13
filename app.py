@@ -4,10 +4,12 @@ import platform
 import json
 import re
 from datetime import datetime, timedelta, date
+from typing import Any, cast
 import traceback
 import threading
 import time
 import hashlib
+import subprocess
 
 
 def dbg(msg):
@@ -37,7 +39,8 @@ def get_template_dir():
     env = os.environ.get('CREATEMAIL_TEMPLATE_DIR') or os.environ.get('CREATE_MAIL_TEMPLATE_DIR')
     if env:
         try:
-            return os.path.abspath(os.path.expanduser(env))
+            if isinstance(env, str):
+                return os.path.abspath(os.path.expanduser(env))
         except Exception:
             pass
     # try config.json
@@ -45,8 +48,10 @@ def get_template_dir():
         if os.path.exists(CONFIG_PATH):
             with open(CONFIG_PATH, 'r', encoding='utf-8') as f:
                 cfg = json.load(f)
-                if isinstance(cfg, dict) and cfg.get('template_dir'):
-                    return os.path.abspath(os.path.expanduser(cfg.get('template_dir')))
+                if isinstance(cfg, dict):
+                    td = cfg.get('template_dir')
+                    if isinstance(td, str) and td:
+                        return os.path.abspath(os.path.expanduser(td))
     except Exception:
         pass
     # fallback default
@@ -345,6 +350,7 @@ def create_schedule():
                 except Exception:
                     pass
                 html_wrapped = None
+                body_html = ''
                 try:
                     def html_escape(s):
                         return (s or '').replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
@@ -413,7 +419,8 @@ def create_schedule():
                 if st_dt:
                     try:
                         import pywintypes
-                        appt.Start = pywintypes.Time(st_dt)
+                        if isinstance(st_dt, datetime):
+                            appt.Start = pywintypes.Time(cast(Any, st_dt))
                         try:
                             appt.Start = st_dt.strftime('%Y-%m-%d %H:%M:%S')
                         except Exception:
@@ -430,7 +437,8 @@ def create_schedule():
                 if en_dt:
                     try:
                         import pywintypes
-                        appt.End = pywintypes.Time(en_dt)
+                        if isinstance(en_dt, datetime):
+                            appt.End = pywintypes.Time(cast(Any, en_dt))
                         try:
                             appt.End = en_dt.strftime('%Y-%m-%d %H:%M:%S')
                         except Exception:
@@ -1281,7 +1289,7 @@ def render_template_server():
 def pick_config_dir():
     # Run pick_dir.py in subprocess to show native dialog on main thread
     try:
-        import subprocess, shutil, sys
+        import shutil, sys
         py = sys.executable or (shutil.which('python') or shutil.which('python3'))
         if not py:
             return jsonify({'status': 'error', 'message': 'python executable not found'}), 500
@@ -1293,8 +1301,11 @@ def pick_config_dir():
         current = None
         try:
             body = request.json or {}
-            if isinstance(body, dict) and body.get('initial'):
-                current = os.path.abspath(os.path.expanduser(body.get('initial')))
+            if isinstance(body, dict):
+                init_val = body.get('initial')
+                if isinstance(init_val, str) and init_val:
+                    # ensure we pass a str to expanduser/abspath for static type checkers
+                    current = os.path.abspath(os.path.expanduser(init_val))
             else:
                 if os.path.exists(CONFIG_PATH):
                     with open(CONFIG_PATH, 'r', encoding='utf-8') as f:
@@ -1303,9 +1314,15 @@ def pick_config_dir():
                         if cur:
                             try:
                                 # normalize and ensure exists so filedialog initialdir works
-                                cur_abs = os.path.abspath(os.path.expanduser(cur))
-                                os.makedirs(cur_abs, exist_ok=True)
-                                current = cur_abs
+                                if isinstance(cur, str) and cur:
+                                    cur_abs = os.path.abspath(os.path.expanduser(cur))
+                                else:
+                                    cur_abs = None
+                                if isinstance(cur_abs, str):
+                                    os.makedirs(cur_abs, exist_ok=True)
+                                    current = cur_abs
+                                else:
+                                    current = None
                             except Exception:
                                 current = None
         except Exception:
