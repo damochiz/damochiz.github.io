@@ -54,7 +54,14 @@ def get_template_dir():
                         return os.path.abspath(os.path.expanduser(td))
     except Exception:
         pass
-    # fallback default
+    # fallback default: user's home under createmailapp/template_files
+    try:
+        home = os.path.expanduser('~')
+        if home:
+            default_dir = os.path.join(home, 'createmailapp', 'template_files')
+            return os.path.abspath(default_dir)
+    except Exception:
+        pass
     return os.path.join(BASE_DIR, 'template_files')
 
 def atomic_write_json(path, data):
@@ -1312,25 +1319,30 @@ def pick_config_dir():
                 if isinstance(init_val, str) and init_val:
                     # ensure we pass a str to expanduser/abspath for static type checkers
                     current = os.path.abspath(os.path.expanduser(init_val))
-            else:
-                if os.path.exists(CONFIG_PATH):
-                    with open(CONFIG_PATH, 'r', encoding='utf-8') as f:
-                        cfg = json.load(f) or {}
-                        cur = cfg.get('template_dir')
-                        if cur:
-                            try:
-                                # normalize and ensure exists so filedialog initialdir works
-                                if isinstance(cur, str) and cur:
-                                    cur_abs = os.path.abspath(os.path.expanduser(cur))
-                                else:
-                                    cur_abs = None
-                                if isinstance(cur_abs, str):
-                                    os.makedirs(cur_abs, exist_ok=True)
-                                    current = cur_abs
-                                else:
-                                    current = None
-                            except Exception:
-                                current = None
+            # If no initial provided, try config.json, otherwise fall back to get_template_dir()
+            if not current:
+                cur = None
+                try:
+                    if os.path.exists(CONFIG_PATH):
+                        with open(CONFIG_PATH, 'r', encoding='utf-8') as f:
+                            cfg = json.load(f) or {}
+                            cur = cfg.get('template_dir')
+                except Exception:
+                    cur = None
+                if isinstance(cur, str) and cur:
+                    try:
+                        cur_abs = os.path.abspath(os.path.expanduser(cur))
+                        os.makedirs(cur_abs, exist_ok=True)
+                        current = cur_abs
+                    except Exception:
+                        current = None
+                else:
+                    # use the new default template dir
+                    try:
+                        current = get_template_dir()
+                        os.makedirs(current, exist_ok=True)
+                    except Exception:
+                        current = None
         except Exception:
             current = None
         args = [py, script]
