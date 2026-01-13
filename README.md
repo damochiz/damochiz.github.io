@@ -65,3 +65,11 @@ Windows Outlook automation:
 
 Default template directory:
 - If no environment variable or `config.json` sets `template_dir`, the app now defaults to `createmailapp/template_files` under the current user's home directory (for example: `C:\Users\<username>\createmailapp\template_files`).
+
+Per-user template directories:
+- If the incoming HTTP request contains an authenticated username (in `REMOTE_USER`, `X-Remote-User`, `X-Forwarded-User`, `X-Username`, basic auth username, or a `username` cookie), the app will resolve the template directory for that user as `C:\Users\<username>\createmailapp\template_files` on Windows (or `/home/<username>/createmailapp/template_files` on Unix). The username is sanitized to remove unsafe characters.
+- Security note: Only use this feature if your front door (reverse proxy / authentication layer) supplies a trusted username header or authentication context. Do NOT rely on untrusted client-sent headers unless you control the proxy.
+
+Template Dir button on headless hosts (App Service / containers):
+- On hosts without a GUI (for example Azure App Service Linux or container instances) the native folder picker cannot run. Using the `Template Dir` button will return a JSON response containing `status: "unavailable"` and the currently resolved `template_dir`.
+- To change the template directory on headless hosts, either POST to `/config` with JSON `{ "template_dir": "<path>" }` or set the environment variable `CREATEMAIL_TEMPLATE_DIR` (or `CREATE_MAIL_TEMPLATE_DIR`) and restart the app.

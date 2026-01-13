@@ -54,7 +54,49 @@ def get_template_dir():
                         return os.path.abspath(os.path.expanduser(td))
     except Exception:
         pass
-    # fallback default: user's home under createmailapp/template_files
+    # fallback default: if there is a request context, try to resolve the visiting
+    # user's account name from common headers/environ/cookies/auth and build
+    # a per-user path like C:\Users\<username>\createmailapp\template_files
+    try:
+        from flask import has_request_context, request
+        if has_request_context():
+            username = None
+            try:
+                # Common sources for an authenticated username
+                username = request.environ.get('REMOTE_USER')
+            except Exception:
+                username = None
+            if not username:
+                username = request.headers.get('X-Remote-User') or request.headers.get('X-Forwarded-User') or request.headers.get('X-Username')
+            try:
+                auth = getattr(request, 'authorization', None)
+                if not username and auth and getattr(auth, 'username', None):
+                    username = auth.username
+            except Exception:
+                pass
+            try:
+                if not username:
+                    username = request.cookies.get('username')
+            except Exception:
+                pass
+
+            if isinstance(username, str) and username:
+                # sanitize username to safe filesystem token
+                try:
+                    import re
+                    uname = re.sub(r'[^A-Za-z0-9_.-]', '', username)
+                except Exception:
+                    uname = username
+                if uname:
+                    if os.name == 'nt':
+                        default_dir = os.path.join('C:\\Users', uname, 'createmailapp', 'template_files')
+                    else:
+                        default_dir = os.path.join('/home', uname, 'createmailapp', 'template_files')
+                    return os.path.abspath(default_dir)
+    except Exception:
+        pass
+
+    # final fallback: current user's home createmailapp/template_files, then repo template_files
     try:
         home = os.path.expanduser('~')
         if home:
@@ -1302,6 +1344,19 @@ def render_template_server():
 def pick_config_dir():
     # Run pick_dir.py in subprocess to show native dialog on main thread
     try:
+        # If we're not on Windows or there's no GUI (e.g. App Service / Linux container),
+        # do not attempt to launch the tkinter-based picker. Return a helpful message
+        # and the resolved template dir so the caller can set it manually.
+        if platform.system() != 'Windows' or not os.environ.get('DISPLAY'):
+            try:
+                td = get_template_dir()
+            except Exception:
+                td = ''
+            return jsonify({
+                'status': 'unavailable',
+                'message': 'Directory picker is not available on this host (no GUI). Use /config POST or set environment variable CREATEMAIL_TEMPLATE_DIR to change the template directory.',
+                'template_dir': td
+            }), 200
         import shutil, sys
         py = sys.executable or (shutil.which('python') or shutil.which('python3'))
         if not py:
