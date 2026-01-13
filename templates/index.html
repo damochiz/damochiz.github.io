@@ -128,12 +128,12 @@
       <div class="modal-content">
         <h3>設定</h3>
         <div style="margin-bottom:8px">テンプレート保存先フォルダを指定してください（OneDrive の CreateMailTool 配下など）</div>
-        <input type="text" id="templateDirInput" style="width:100%" placeholder="C:\\Users\\you\\OneDrive\\CreateMailTool\\template_files" />
+        <input type="text" id="templateDirInput" style="width:calc(100% - 16px);box-sizing:border-box;margin-right:16px" placeholder="C:\\Users\\you\\OneDrive\\CreateMailTool\\template_files" />
         <div style="margin-top:8px;margin-bottom:8px">
           <button id="pickConfigBtn">Explorer から選択</button>
         </div>
         <div style="margin-top:8px">
-          <label class="label" style="display:block;margin-bottom:6px">テンプレート保存モード:</label>
+          <label style="display:inline-block;margin-bottom:6px;white-space:nowrap;width:auto;overflow:visible;text-align:left;margin-right:12px;vertical-align:middle">テンプレート保存モード:</label>
           <label><input type="radio" name="storageMode" value="local" checked> ローカル</label>
           <label style="margin-left:12px"><input type="radio" name="storageMode" value="blob"> Blob ストレージ</label>
         </div>
