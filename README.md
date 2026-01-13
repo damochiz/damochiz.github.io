@@ -56,3 +56,5 @@ az webapp config appsettings set --resource-group myResourceGroup --name <your-a
 Notes:
 - This app includes Windows-only Outlook automation; keep `DISABLE_WINDOWS_AUTOMATION=true` on Linux.
 - Use the provided `Procfile` which runs `gunicorn`.
+
+Note for CI: Windows-only dependencies are split into `requirements-windows.txt`. CI runners on Linux should install only `requirements.txt` to avoid installing `pywin32`.
