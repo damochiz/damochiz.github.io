@@ -38,7 +38,10 @@
         <div class="row"><span class="label"></span><button id="srImportBtn">SR Import</button> <button id="changeTemplateDirBtn" class="btn-small" title="テンプレート保存先を変更">Template Dir</button></div>
         <div style="height:8px"></div>
         <div class="row"><span class="label">SR 番号:</span>
-          <input list="srList" id="srNumberInput" style="width:420px" placeholder="SR番号を入力または選択" />
+          <input list="srList" id="srNumberInput" style="width:380px" placeholder="SR番号を入力または選択" />
+          <button type="button" id="dfmBtn" class="btn-small" style="margin-left:16px;padding:8px 4px;width:30px">DfM</button>
+          <button type="button" id="ascBtn" class="btn-small" style="margin-left:8px;padding:8px 4px;width:30px">ASC</button>
+          <span id="srWarning" style="color:crimson;margin-left:8px;display:none;font-weight:600"></span>
           <datalist id="srList"></datalist>
         </div>
         <div class="row customer"><span class="label">お客様名:</span>
@@ -99,6 +102,7 @@
       </div>
       <div id="right">
         <div style="display:flex;align-items:center;justify-content:flex-end;margin-bottom:6px;gap:8px">
+          <button type="button" id="copyPreviewBtn" style="padding:4px 8px" title="右側テキストをクリップボードにコピー">Copy</button>
           <button type="button" id="refreshPreviewBtn" style="padding:4px 8px">Refresh</button>
           <button type="button" id="reloadPageBtn" title="Reload page" style="padding:4px 8px">Reload</button>
         </div>

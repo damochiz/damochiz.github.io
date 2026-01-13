@@ -373,6 +373,39 @@ if (document.readyState === 'loading'){
   }
 }
 
+// Copy preview button: copy selected text if any, otherwise copy #largePanel content
+(function(){
+  const copyBtn = document.getElementById('copyPreviewBtn');
+  if (!copyBtn) return;
+  copyBtn.addEventListener('click', async function(){
+    try{
+      // If user has a selection in the document, prefer copying that
+      const selection = window.getSelection();
+      let textToCopy = '';
+      if (selection && selection.toString().trim()){
+        textToCopy = selection.toString();
+      } else {
+        const panel = document.getElementById('largePanel');
+        textToCopy = panel ? panel.textContent || '' : '';
+      }
+      if (!textToCopy){ console.warn('コピーするテキストがありません'); return; }
+      // Try navigator.clipboard first
+      if (navigator.clipboard && navigator.clipboard.writeText){
+        try{ await navigator.clipboard.writeText(textToCopy); console.info('クリップボードにコピーしました'); return; }catch(e){ /* fallthrough to fallback */ }
+      }
+      // Fallback: create textarea, select, execCommand
+      const ta = document.createElement('textarea');
+      ta.style.position = 'fixed'; ta.style.left = '-9999px'; ta.style.top = '0'; ta.setAttribute('aria-hidden','true');
+      ta.value = textToCopy;
+      document.body.appendChild(ta);
+      ta.focus(); ta.select();
+      const ok = document.execCommand && document.execCommand('copy');
+      document.body.removeChild(ta);
+      if (ok) console.info('クリップボードにコピーしました'); else console.warn('コピーに失敗しました');
+    }catch(e){ console.error('copy failed', e); console.warn('コピーに失敗しました: ' + e); }
+  });
+})();
+
 // Load phone statuses and populate phoneStatus select
 async function loadPhoneStatuses(){
   try{
@@ -582,24 +615,60 @@ async function loadSrList(){
     // when user types or selects, attempt to autofill if exact match
     input.addEventListener('input', function(){
       const val = input.value && input.value.trim() ? input.value.trim() : '';
-      if (!val) return;
+      const warningEl = document.getElementById('srWarning');
+      const customerEl = document.getElementById('customerName');
+      const titleEl = document.getElementById('title');
+      const contentEl = document.getElementById('content');
+
+      // If input is empty: clear customer and title and hide warning
+      if (!val){
+        try{ if (customerEl) customerEl.value = ''; }catch(e){}
+        try{ if (titleEl) titleEl.value = ''; }catch(e){}
+        try{ if (contentEl) contentEl.value = ''; }catch(e){}
+        if (warningEl) { warningEl.style.display = 'none'; warningEl.textContent = ''; }
+        // refresh preview to reflect cleared fields
+        try{ const emailSelect = document.getElementById('emailType'); if (emailSelect && emailSelect.value) emailSelect.dispatchEvent(new Event('change')); else { const panel = document.getElementById('largePanel'); if (panel){ (async ()=>{ const tpl = panel.textContent || ''; const server = await renderWithServer(tpl); if (server){ panel.textContent = sanitizeBlankLines(applySyncPlaceholders(server)); } else { panel.textContent = sanitizeBlankLines(applyTemplatePlaceholders(tpl)); } })(); } } }catch(e){ console.error('refresh on sr clear failed', e); }
+        return;
+      }
+
       const meta = window.__srMap[val];
-      // customer name / title
+      // If SR not in the datalist / map: show warning and do not overwrite customer/title (to preserve user edits)
+      if (!meta){
+        if (warningEl){ warningEl.textContent = '未登録の SR 番号です'; warningEl.style.display = 'inline'; }
+        // still clear content area since it's SR-specific
+        try{ if (contentEl) contentEl.value = ''; }catch(e){}
+        // refresh preview to show cleared content
+        try{ const emailSelect = document.getElementById('emailType'); if (emailSelect && emailSelect.value) emailSelect.dispatchEvent(new Event('change')); else { const panel = document.getElementById('largePanel'); if (panel){ (async ()=>{ const tpl = panel.textContent || ''; const server = await renderWithServer(tpl); if (server){ panel.textContent = sanitizeBlankLines(applySyncPlaceholders(server)); } else { panel.textContent = sanitizeBlankLines(applyTemplatePlaceholders(tpl)); } })(); } } }catch(e){ console.error('refresh on sr invalid failed', e); }
+        return;
+      }
+
+      // Valid SR: hide warning and populate fields
+      if (warningEl) { warningEl.style.display = 'none'; warningEl.textContent = ''; }
       try{
-        const customerEl = document.getElementById('customerName');
-        const titleEl = document.getElementById('title');
-        const contentEl = document.getElementById('content');
-        if (meta){
-          if (meta.replace_name) customerEl.value = meta.replace_name;
-          else if (meta.contact) customerEl.value = meta.contact;
-          if (meta.customer_title) titleEl.value = meta.customer_title;
-          // always set content: use sympton when present, otherwise clear
-          if (contentEl) contentEl.value = (meta.sympton || '');
-        } else {
-          // no meta found for this SR: clear content (but don't touch customer/title to avoid losing user edits)
-          if (contentEl) contentEl.value = '';
-        }
+        if (meta.replace_name) customerEl.value = meta.replace_name;
+        else if (meta.contact) customerEl.value = meta.contact;
+        if (meta.customer_title) titleEl.value = meta.customer_title;
+        if (contentEl) contentEl.value = (meta.sympton || '');
       }catch(e){ /* ignore DOM errors */ }
+
+      // Refresh preview on SR change so right panel reflects updated fields
+      try{
+        const emailSelect = document.getElementById('emailType');
+        if (emailSelect && emailSelect.value){
+          try{ emailSelect.dispatchEvent(new Event('change')); }
+          catch(e){ /* ignore */ }
+        } else {
+          const panel = document.getElementById('largePanel');
+          if (panel){
+            (async ()=>{
+              const tpl = panel.textContent || '';
+              const server = await renderWithServer(tpl);
+              if (server){ panel.textContent = sanitizeBlankLines(applySyncPlaceholders(server)); }
+              else { panel.textContent = sanitizeBlankLines(applyTemplatePlaceholders(tpl)); }
+            })();
+          }
+        }
+      }catch(e){ console.error('refresh on sr input failed', e); }
     });
   }catch(e){ console.error('loadSrList failed', e); }
 }
@@ -682,6 +751,24 @@ if (srImportSaveBtn){
     }catch(e){ alert('取り込みに失敗しました: ' + e); }
   });
 }
+
+// DfM and ASC buttons: open target URLs with SR number in new tab
+(function(){
+  function openWithSr(baseUrlTemplate){
+    try{
+      const srEl = document.getElementById('srNumberInput');
+      const sr = srEl && srEl.value ? srEl.value.toString().trim() : '';
+      if (!sr){ console.warn('ボタン操作: SR番号が入力されていません'); return; }
+      const encoded = encodeURIComponent(sr);
+      const url = baseUrlTemplate.replace(/<sr_number>/g, encoded);
+      window.open(url, '_blank');
+    }catch(e){ console.error('openWithSr failed', e); }
+  }
+  const dfm = document.getElementById('dfmBtn');
+  if (dfm){ dfm.addEventListener('click', function(){ openWithSr('https://onesupport.crm.dynamics.com/main.aspx?appid=101acb62-8d00-eb11-a813-000d3a8b3117&pagetype=search&searchText=<sr_number>'); }); }
+  const asc = document.getElementById('ascBtn');
+  if (asc){ asc.addEventListener('click', function(){ openWithSr('https://azuresupportcenter.azure.com/solutionexplorer?srId=<sr_number>'); }); }
+})();
 
 function openModalWithContent(content){
   editor.value = content;
