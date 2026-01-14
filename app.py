@@ -17,6 +17,9 @@ from functools import lru_cache
 
 
 def dbg(msg):
+    # Respect an environment flag to disable debug logging entirely.
+    if os.environ.get('DISABLE_DEBUG_LOG', '').lower() in ('1', 'true', 'yes'):
+        return
     try:
         tf = os.path.join(BASE_DIR, 'render_debug.log')
         with open(tf, 'a', encoding='utf-8') as f:
@@ -522,7 +525,12 @@ def create_mail():
     data = request.json or {}
     # prefer the largePanel content if provided
     body = data.get('content') or data.get('preview') or ''
-    subject = data.get('title') or data.get('emailType') or ''
+    # Use SR-based subject when available: "<sr_number> メール送信用"
+    sr = data.get('srNumber', '') or data.get('sr', '')
+    if sr:
+        subject = f"{sr} メール送信用"
+    else:
+        subject = data.get('title') or data.get('emailType') or ''
 
     # Only attempt Outlook automation on Windows and when not disabled by env
     if str(DISABLE_WINDOWS_AUTOMATION).lower() in ('1', 'true', 'yes') or platform.system() != 'Windows':

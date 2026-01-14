@@ -35,7 +35,8 @@ if (_createMailBtn){
   _createMailBtn.addEventListener('click', async function(){
     const panelText = document.getElementById('largePanel') ? document.getElementById('largePanel').textContent : '';
     const titleEl = document.getElementById('title');
-    const payload = { content: panelText, title: titleEl ? titleEl.value : '' };
+    const srEl = document.getElementById('srNumberInput');
+    const payload = { content: panelText, title: titleEl ? titleEl.value : '', srNumber: srEl ? srEl.value : '' };
     try{
       const res = await postJson('/create_mail', payload);
       if (res && res.status === 'ok') {
