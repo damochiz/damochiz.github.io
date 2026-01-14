@@ -42,9 +42,30 @@ if (_createMailBtn){
       if (res && res.status === 'ok') {
         alert('Outlook に新しいメールを作成しました。');
       } else {
-        alert('メール作成に失敗しました: ' + (res && res.message ? res.message : 'Unknown'));
+        // If server indicates Outlook automation is not supported, fall back to mailto.
+        const msg = (res && res.message) ? res.message : 'Unknown';
+        // Create a mailto fallback to open client mail composer.
+        const body = encodeURIComponent(panelText || '');
+        const subject = encodeURIComponent(titleEl ? titleEl.value : '');
+        const mailto = `mailto:?subject=${subject}&body=${body}`;
+        try{
+          window.location.href = mailto;
+          alert('サーバーがメール作成をサポートしていないため、ブラウザのメール作成画面を開きます。');
+        }catch(e){
+          alert('メール作成に失敗しました: ' + msg);
+        }
       }
-    }catch(e){ alert('メール作成に失敗しました: ' + e); }
+    }catch(e){
+      // Network or unexpected error — attempt mailto fallback
+      try{
+        const body = encodeURIComponent(panelText || '');
+        const subject = encodeURIComponent(titleEl ? titleEl.value : '');
+        window.location.href = `mailto:?subject=${subject}&body=${body}`;
+        alert('ネットワークエラーのため、ブラウザのメール作成画面を開きます。');
+      }catch(ee){
+        alert('メール作成に失敗しました: ' + e);
+      }
+    }
   });
 } else { console.warn('createMailBtn not found'); }
 
