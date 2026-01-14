@@ -46,10 +46,15 @@ if (_createMailBtn){
         const msg = (res && res.message) ? res.message : 'Unknown';
         // Create a mailto fallback to open client mail composer.
         const body = encodeURIComponent(panelText || '');
-        const subject = encodeURIComponent(titleEl ? titleEl.value : '');
-        const mailto = `mailto:?subject=${subject}&body=${body}`;
+        const subjectRaw = titleEl ? titleEl.value : '';
+        const subject = subjectRaw ? encodeURIComponent(subjectRaw) : '';
+        const params = [];
+        if (subject) params.push('subject=' + subject);
+        if (body) params.push('body=' + body);
+        const mailto = 'mailto:' + (params.length ? ('?' + params.join('&')) : '');
         try{
-          window.location.href = mailto;
+          // use window.open to let the browser handle the mail client registration
+          window.open(mailto);
           alert('サーバーがメール作成をサポートしていないため、ブラウザのメール作成画面を開きます。');
         }catch(e){
           alert('メール作成に失敗しました: ' + msg);
@@ -59,8 +64,13 @@ if (_createMailBtn){
       // Network or unexpected error — attempt mailto fallback
       try{
         const body = encodeURIComponent(panelText || '');
-        const subject = encodeURIComponent(titleEl ? titleEl.value : '');
-        window.location.href = `mailto:?subject=${subject}&body=${body}`;
+        const subjectRaw = titleEl ? titleEl.value : '';
+        const subject = subjectRaw ? encodeURIComponent(subjectRaw) : '';
+        const params = [];
+        if (subject) params.push('subject=' + subject);
+        if (body) params.push('body=' + body);
+        const mailto = 'mailto:' + (params.length ? ('?' + params.join('&')) : '');
+        window.open(mailto);
         alert('ネットワークエラーのため、ブラウザのメール作成画面を開きます。');
       }catch(ee){
         alert('メール作成に失敗しました: ' + e);
